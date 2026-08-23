@@ -25,17 +25,9 @@ struct DashboardView: View {
         case .overview:
             OverviewView()
         case .activity:
-            PlaceholderSection(
-                title: "Activity",
-                subtitle: "Sanitized observations will appear here after capture is implemented.",
-                symbol: "clock.arrow.circlepath"
-            )
+            ActivityView()
         case .permissions:
-            PlaceholderSection(
-                title: "Permissions",
-                subtitle: "Accessibility onboarding and the application allowlist are the next milestone.",
-                symbol: "hand.raised"
-            )
+            PermissionsView()
         case .agents:
             PlaceholderSection(
                 title: "Agents",
@@ -90,16 +82,21 @@ private struct OverviewView: View {
 
                 LazyVGrid(columns: columns, spacing: 14) {
                     MetricCard(title: "Capture", value: model.status.rawValue, symbol: model.status.menuBarSymbol)
-                    MetricCard(title: "Observations", value: "0", symbol: "text.append")
-                    MetricCard(title: "Agent clients", value: "0", symbol: "point.3.connected.trianglepath.dotted")
+                    MetricCard(title: "Observations", value: "\(model.events.count)", symbol: "text.append")
+                    MetricCard(title: "Allowed apps", value: "\(model.allowedBundleIDs.count)", symbol: "checkmark.shield")
                 }
 
                 VStack(alignment: .leading, spacing: 0) {
-                    SectionHeading(title: "Prototype status", subtitle: "Milestone 1 of the local memory system")
+                    SectionHeading(title: "Prototype status", subtitle: "Live events remain in memory and disappear when Mnemos quits")
 
                     MilestoneRow(symbol: "checkmark.circle.fill", color: .green, title: "Native macOS shell", detail: "SwiftUI dashboard and menu-bar controls")
                     Divider().padding(.leading, 48)
-                    MilestoneRow(symbol: "circle", color: .secondary, title: "Accessibility capture", detail: "Explicit allowlist and privacy filtering")
+                    MilestoneRow(
+                        symbol: model.accessibilityTrusted ? "checkmark.circle.fill" : "circle",
+                        color: model.accessibilityTrusted ? .green : .secondary,
+                        title: "Accessibility capture",
+                        detail: "Explicit application allowlist and secure-field rejection"
+                    )
                     Divider().padding(.leading, 48)
                     MilestoneRow(symbol: "circle", color: .secondary, title: "Local memory", detail: "Encrypted SQLite, episodes, and retrieval")
                     Divider().padding(.leading, 48)
@@ -112,15 +109,19 @@ private struct OverviewView: View {
                         .font(.title3)
                         .foregroundStyle(.blue)
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("Nothing is being recorded yet")
+                        Text(bannerTitle)
                             .font(.headline)
-                        Text("The Start Capture control changes this prototype’s UI state only. We’ll connect it to macOS Accessibility after this shell is verified on your Mac.")
+                        Text(model.captureMessage ?? model.status.detail)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
-                    Button(model.isRunning ? "Pause" : "Try UI state") {
-                        model.toggleCapture()
+                    Button(bannerButtonTitle) {
+                        if !model.accessibilityTrusted || model.allowedBundleIDs.isEmpty {
+                            model.selectedSection = .permissions
+                        } else {
+                            model.toggleCapture()
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -131,6 +132,18 @@ private struct OverviewView: View {
             .frame(maxWidth: 1_100, alignment: .leading)
         }
         .navigationTitle("Overview")
+    }
+
+    private var bannerTitle: String {
+        if !model.accessibilityTrusted { return "Accessibility access is required" }
+        if model.allowedBundleIDs.isEmpty { return "Choose which applications Mnemos may observe" }
+        return model.isRunning ? "Live capture is active" : "Ready to capture allowed applications"
+    }
+
+    private var bannerButtonTitle: String {
+        if !model.accessibilityTrusted { return "Set up" }
+        if model.allowedBundleIDs.isEmpty { return "Choose apps" }
+        return model.isRunning ? "Pause" : "Start capture"
     }
 
     private var header: some View {
@@ -150,6 +163,148 @@ private struct OverviewView: View {
                 .padding(.vertical, 7)
                 .background(.quaternary, in: Capsule())
         }
+    }
+}
+
+private struct ActivityView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        Group {
+            if model.events.isEmpty {
+                ContentUnavailableView(
+                    "No captured activity",
+                    systemImage: "clock.arrow.circlepath",
+                    description: Text("Grant Accessibility access, allow an application, and start capture. Events stay in memory for this prototype.")
+                )
+            } else {
+                List(model.events) { event in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack {
+                            Text(event.applicationName)
+                                .font(.headline)
+                            Text(event.kind.rawValue)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(.quaternary, in: Capsule())
+                            Spacer()
+                            Text(event.timestamp, format: .dateTime.hour().minute().second())
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        if let title = event.windowTitle {
+                            Text(title).lineLimit(2)
+                        }
+                        if let detail = event.detail {
+                            Text(detail)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                        }
+                        Text(event.bundleID)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+        }
+        .navigationTitle("Activity")
+        .toolbar {
+            ToolbarItemGroup {
+                Button(model.isRunning ? "Pause" : "Start") { model.toggleCapture() }
+                Button("Clear") { model.clearEvents() }
+                    .disabled(model.events.isEmpty)
+            }
+        }
+    }
+}
+
+private struct PermissionsView: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Image(systemName: model.accessibilityTrusted ? "checkmark.shield.fill" : "hand.raised.fill")
+                            .font(.title2)
+                            .foregroundStyle(model.accessibilityTrusted ? .green : .orange)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(model.accessibilityTrusted ? "Accessibility access granted" : "Accessibility access required")
+                                .font(.headline)
+                            Text("Mnemos uses this permission to read context from applications you explicitly allow.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+
+                    HStack {
+                        if !model.accessibilityTrusted {
+                            Button("Request access") { model.requestAccessibilityPermission() }
+                                .buttonStyle(.borderedProminent)
+                        }
+                        Button("Open System Settings") { model.openAccessibilitySettings() }
+                    }
+                }
+                .cardStyle()
+
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionHeading(
+                        title: "Allowed applications",
+                        subtitle: "The default is none. Browsers stay disabled until domain-level controls are available."
+                    )
+                    Divider()
+
+                    if model.availableApplications.isEmpty {
+                        Text("No foreground applications are currently available.")
+                            .foregroundStyle(.secondary)
+                            .padding(18)
+                    } else {
+                        ForEach(model.availableApplications) { application in
+                            HStack(spacing: 12) {
+                                Image(systemName: application.isBrowser ? "globe" : "app")
+                                    .frame(width: 24)
+                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(application.name)
+                                    Text(application.isBrowser ? "Browser domain rules required" : application.bundleID)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Toggle(
+                                    "Allow",
+                                    isOn: Binding(
+                                        get: { model.allowedBundleIDs.contains(application.bundleID) },
+                                        set: { model.setApplication(application, allowed: $0) }
+                                    )
+                                )
+                                .labelsHidden()
+                                .disabled(application.isBrowser)
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 11)
+                            Divider().padding(.leading, 54)
+                        }
+                    }
+                }
+                .cardStyle()
+
+                Text("Prototype boundary: Mnemos reads focused window titles, explicitly selected text, and non-editable control descriptions. It does not read raw keystrokes, text-field values, clipboard contents, screenshots, audio, or browser page content.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(30)
+            .frame(maxWidth: 900, alignment: .leading)
+        }
+        .navigationTitle("Permissions")
+        .onAppear { model.refreshAvailableApplications() }
     }
 }
 

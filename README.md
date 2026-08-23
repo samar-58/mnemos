@@ -5,7 +5,7 @@ Mnemos is an open-source, local-first memory layer for AI agents on macOS.
 The long-term goal is simple: your computer context should belong to you, and authorized agents such as Codex, Claude, and Cursor should be able to retrieve the same useful, provenance-backed memory.
 
 > [!IMPORTANT]
-> This repository is an early prototype. The current milestone provides the native macOS application shell and menu-bar experience. It does **not** capture or store computer activity yet.
+> This repository is an early prototype. Mnemos can capture a small, privacy-filtered set of Accessibility context from explicitly allowed applications. Events currently remain in memory and disappear when the app quits.
 
 ## Product principles
 
@@ -40,15 +40,20 @@ Swift will own collection, privacy policy, persistence, and product behavior. Th
 
 ## Current status
 
-Milestone 1 is implemented:
+The first two prototype milestones are implemented:
 
 - Swift 6 and SwiftUI macOS application
 - Menu-bar app experience
 - Native dashboard shell
 - Overview, activity, permissions, agents, and settings sections
+- Native Accessibility permission onboarding
+- Empty-by-default application allowlist
+- In-memory live inspector for window titles and explicitly selected text
+- Secure-field and editable-text-value rejection
+- Browser capture disabled until domain rules are available
 - Reproducible Xcode project generation
 
-The capture toggle currently changes UI state only. No activity is recorded.
+No activity is written to disk yet.
 
 ## Requirements
 
@@ -93,7 +98,7 @@ mnemos/
 ## Roadmap
 
 1. Native macOS shell and menu-bar experience — complete
-2. Accessibility onboarding and allowlist-only capture
+2. Accessibility onboarding and allowlist-only capture — complete for the in-memory prototype
 3. Privacy filtering, encrypted storage, and deterministic episodes
 4. Authenticated loopback API
 5. TypeScript stdio MCP adapter
