@@ -6,7 +6,7 @@ Generate and open the Xcode project from the repository root:
 
 ```sh
 xcodegen generate
-open macos/ComputerHistory.xcodeproj
+open macos/Mnemos.xcodeproj
 ```
 
 The application currently changes UI state only. It does not request Accessibility permission or record any activity yet.

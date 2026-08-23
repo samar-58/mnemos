@@ -5,7 +5,7 @@
 DerivedData/
 *.xcuserstate
 xcuserdata/
-macos/ComputerHistory.xcodeproj/
+macos/Mnemos.xcodeproj/
 mcp/build/
 mcp/node_modules/
 mcp/.env

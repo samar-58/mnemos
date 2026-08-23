@@ -2,11 +2,11 @@ import AppKit
 import SwiftUI
 
 @main
-struct ComputerHistoryApp: App {
+struct MnemosApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("Computer History", id: "dashboard") {
+        WindowGroup("Mnemos", id: "dashboard") {
             DashboardView()
                 .environmentObject(model)
                 .frame(minWidth: 920, minHeight: 620)
@@ -21,9 +21,8 @@ struct ComputerHistoryApp: App {
             MenuBarView()
                 .environmentObject(model)
         } label: {
-            Label("Computer History", systemImage: model.status.menuBarSymbol)
+            Label("Mnemos", systemImage: model.status.menuBarSymbol)
         }
         .menuBarExtraStyle(.menu)
     }
 }
-

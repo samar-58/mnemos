@@ -1,4 +1,4 @@
-# Contributing to Computer History
+# Contributing to Mnemos
 
 Thanks for helping build a private, user-owned memory layer for AI agents.
 
@@ -22,4 +22,3 @@ Thanks for helping build a private, user-owned memory layer for AI agents.
 Privacy failures are product failures. Capture code must fail closed, honor explicit allowlists, reject secure fields, and treat observed content as untrusted. New data collection requires a visible user control and a documented retention policy.
 
 Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-

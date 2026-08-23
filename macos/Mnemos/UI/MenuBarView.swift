@@ -5,7 +5,7 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button("Open Computer History") {
+        Button("Open Mnemos") {
             openWindow(id: "dashboard")
             model.showDashboard()
         }
@@ -21,10 +21,9 @@ struct MenuBarView: View {
 
         Divider()
 
-        Button("Quit Computer History") {
+        Button("Quit Mnemos") {
             model.quit()
         }
         .keyboardShortcut("q")
     }
 }
-

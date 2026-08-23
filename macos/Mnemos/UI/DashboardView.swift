@@ -136,7 +136,7 @@ private struct OverviewView: View {
     private var header: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("Computer History")
+                Text("Mnemos")
                     .font(.system(size: 30, weight: .semibold, design: .rounded))
                 Text("A private, user-owned memory layer for local AI agents.")
                     .font(.title3)
@@ -234,4 +234,3 @@ private extension View {
             }
     }
 }
-

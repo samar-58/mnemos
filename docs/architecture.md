@@ -1,10 +1,10 @@
 # Prototype architecture
 
-Computer History is designed as two local processes with a narrow trust boundary.
+Mnemos is designed as two local processes with a narrow trust boundary.
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ Computer History.app (Swift)                               │
+│ Mnemos.app (Swift)                                         │
 │                                                            │
 │ SwiftUI and AppKit                                         │
 │        │                                                   │
@@ -65,4 +65,3 @@ Authenticated versioned loopback API, per-client audit records, TypeScript stdio
 ### 5. Dogfood validation
 
 Verify that multiple agents can answer where the user left off with the same episode, timestamps, applications, documents, and evidence identifiers.
-

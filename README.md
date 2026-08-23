@@ -1,6 +1,6 @@
-# Computer History
+# Mnemos
 
-Computer History is an open-source, local-first memory layer for AI agents on macOS.
+Mnemos is an open-source, local-first memory layer for AI agents on macOS.
 
 The long-term goal is simple: your computer context should belong to you, and authorized agents such as Codex, Claude, and Cursor should be able to retrieve the same useful, provenance-backed memory.
 
@@ -80,13 +80,13 @@ Or open the generated project in Xcode:
 make open
 ```
 
-The generated `macos/ComputerHistory.xcodeproj` is intentionally ignored. [`project.yml`](project.yml) is the source of truth, which avoids noisy Xcode project-file conflicts.
+The generated `macos/Mnemos.xcodeproj` is intentionally ignored. [`project.yml`](project.yml) is the source of truth, which avoids noisy Xcode project-file conflicts.
 
 ## Repository structure
 
 ```text
-computer-history/
-├── macos/ComputerHistory/   # SwiftUI application source
+mnemos/
+├── macos/Mnemos/            # SwiftUI application source
 ├── docs/                    # Product and architecture notes
 ├── project.yml              # XcodeGen project definition
 └── Makefile                 # Local development commands
@@ -109,5 +109,4 @@ Contributions and design discussion are welcome. Read [CONTRIBUTING.md](CONTRIBU
 
 ## License
 
-Computer History is available under the [MIT License](LICENSE).
-
+Mnemos is available under the [MIT License](LICENSE).

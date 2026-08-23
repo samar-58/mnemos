@@ -1,7 +1,7 @@
-PROJECT := macos/ComputerHistory.xcodeproj
-SCHEME := ComputerHistory
+PROJECT := macos/Mnemos.xcodeproj
+SCHEME := Mnemos
 DERIVED_DATA := .deriveddata
-APP := $(DERIVED_DATA)/Build/Products/Debug/Computer History.app
+APP := $(DERIVED_DATA)/Build/Products/Debug/Mnemos.app
 
 .PHONY: project build run open clean
 
@@ -19,4 +19,3 @@ open: project
 
 clean:
 	xcodebuild -project "$(PROJECT)" -scheme "$(SCHEME)" -derivedDataPath "$(DERIVED_DATA)" clean
-

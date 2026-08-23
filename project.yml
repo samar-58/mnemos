@@ -1,7 +1,7 @@
-name: ComputerHistory
+name: Mnemos
 
 options:
-  bundleIdPrefix: dev.computerhistory
+  bundleIdPrefix: dev.mnemos
   deploymentTarget:
     macOS: "15.0"
   xcodeVersion: "26.0"
@@ -16,17 +16,17 @@ settings:
     ENABLE_HARDENED_RUNTIME: YES
 
 targets:
-  ComputerHistory:
+  Mnemos:
     type: application
     platform: macOS
     sources:
-      - path: macos/ComputerHistory
+      - path: macos/Mnemos
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.computerhistory.app
-        PRODUCT_NAME: Computer History
+        PRODUCT_BUNDLE_IDENTIFIER: dev.mnemos.app
+        PRODUCT_NAME: Mnemos
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Computer History
+        INFOPLIST_KEY_CFBundleDisplayName: Mnemos
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
         INFOPLIST_KEY_LSUIElement: YES
         INFOPLIST_KEY_NSPrincipalClass: NSApplication
@@ -34,4 +34,3 @@ targets:
     scheme:
       testTargets: []
       gatherCoverageData: false
-
