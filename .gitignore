@@ -1,0 +1,13 @@
+.DS_Store
+.superstack/
+.build/
+.deriveddata/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+macos/ComputerHistory.xcodeproj/
+mcp/build/
+mcp/node_modules/
+mcp/.env
+*.sqlite-shm
+*.sqlite-wal

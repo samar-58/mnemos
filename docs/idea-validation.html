@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Universal Computer Memory — Idea Validation</title>
+  <style>
+    :root { color-scheme: light dark; --bg:#0b1020; --card:#121a2e; --text:#eef3ff; --muted:#a9b4cc; --accent:#7dd3fc; --good:#86efac; --warn:#fbbf24; --bad:#fca5a5; --line:#26324c; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:1000px; margin:auto; padding:56px 24px 80px; }
+    h1 { font-size:clamp(34px,6vw,64px); line-height:1; letter-spacing:-.04em; margin:0 0 16px; }
+    h2 { margin:40px 0 14px; letter-spacing:-.02em; }
+    h3 { margin:0 0 6px; }
+    p { color:var(--muted); }
+    .lead { max-width:760px; font-size:20px; }
+    .verdict { display:inline-block; padding:7px 12px; border:1px solid #347750; color:var(--good); border-radius:999px; font-weight:700; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(250px,1fr)); gap:14px; }
+    .card { padding:20px; background:var(--card); border:1px solid var(--line); border-radius:16px; }
+    .card p { margin:0; }
+    .score { font-size:36px; color:var(--accent); font-weight:750; }
+    table { width:100%; border-collapse:collapse; background:var(--card); border-radius:14px; overflow:hidden; }
+    th,td { padding:13px 16px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+    th { color:var(--accent); }
+    code { color:var(--accent); }
+    li { margin:8px 0; color:var(--muted); }
+    a { color:var(--accent); }
+    .critical { color:var(--bad); } .high { color:var(--warn); }
+    footer { margin-top:48px; padding-top:20px; border-top:1px solid var(--line); color:var(--muted); font-size:14px; }
+  </style>
+</head>
+<body><main>
+  <span class="verdict">CONDITIONAL GO</span>
+  <h1>Build the continuity engine, not another recorder.</h1>
+  <p class="lead">The problem is real and now independently validated. The generic product—capture desktop activity, search it, expose it over MCP—is already crowded. The opening is reliable, explainable task memory that helps an agent resume work with minimal context.</p>
+
+  <section class="grid">
+    <article class="card"><div class="score">3/3</div><h3>Category demand</h3><p>OpenAI shipped Computer History; Screenpipe has meaningful adoption.</p></article>
+    <article class="card"><div class="score">3/3</div><h3>MVP feasibility</h3><p>An event-only macOS prototype is achievable without OCR, audio, or sync.</p></article>
+    <article class="card"><div class="score">1/3</div><h3>Differentiation</h3><p>The proposed semantic memory layer is plausible but unproven.</p></article>
+    <article class="card"><div class="score">1/3</div><h3>Distribution</h3><p>Open source and MCP help, but no initial community or channel is established yet.</p></article>
+    <article class="card"><div class="score">?/3</div><h3>Founder fit</h3><p>Not enough evidence yet about macOS, security, or ML systems experience.</p></article>
+  </section>
+
+  <h2>What must change</h2>
+  <table>
+    <tr><th>Current framing</th><th>Sharper framing</th></tr>
+    <tr><td>Persistent computer memory</td><td>Local, vendor-neutral task continuity for AI agents</td></tr>
+    <tr><td>Capture everything</td><td>Capture the minimum useful event set; expand only when evaluation proves a gap</td></tr>
+    <tr><td>Search history</td><td>Return episodes, decisions, changes, blockers, and next steps with provenance</td></tr>
+    <tr><td>Any agent can access it</td><td>Each agent gets an explicit capability grant, scoped by app, project, content type, and time</td></tr>
+    <tr><td>Memory as truth</td><td>Memory as a confidence-scored inference the user can inspect, correct, or delete</td></tr>
+  </table>
+
+  <h2>Recommended product wedge</h2>
+  <ol>
+    <li>Observe app switches, window/document titles, focused Accessibility elements, browser URLs where accessible, and idle boundaries.</li>
+    <li>Group raw events into task episodes using time, app, document, repository, and semantic continuity.</li>
+    <li>Extract only durable objects: goals, files touched, commands/outcomes, decisions, blockers, and unresolved next steps.</li>
+    <li>Answer one high-value request: “Where did I leave off on this project?” with timestamps and links back to evidence.</li>
+    <li>Expose that answer through permissioned MCP tools with strict token budgets and a query audit trail.</li>
+  </ol>
+
+  <h2>Non-negotiable features</h2>
+  <div class="grid">
+    <article class="card"><h3>Provenance</h3><p>Every derived memory links to the events that produced it.</p></article>
+    <article class="card"><h3>Privacy controls</h3><p>Allow/deny apps and sites, pause, private-mode exclusion, retention, inspect, delete, and export.</p></article>
+    <article class="card"><h3>Secret filtering</h3><p>Suppress password fields, tokens, recovery phrases, and sensitive windows before persistence.</p></article>
+    <article class="card"><h3>Untrusted-content boundary</h3><p>Captured text is data, never agent instruction. Defend retrieval against prompt injection.</p></article>
+    <article class="card"><h3>Agent permissions</h3><p>Separate grants per client and per query, with visible access history.</p></article>
+    <article class="card"><h3>Correction</h3><p>Users can merge/split episodes and correct wrong conclusions.</p></article>
+  </div>
+
+  <h2>Risks</h2>
+  <table>
+    <tr><th>Severity</th><th>Risk</th><th>Mitigation</th></tr>
+    <tr><td class="critical">Critical</td><td>Secrets or private conversations leak to an agent.</td><td>Minimize capture, filter before storage, encrypt locally, scope retrieval, and log every agent query.</td></tr>
+    <tr><td class="high">High</td><td>Screenpipe already covers the feature checklist.</td><td>Do not compete on OCR/audio/recording. Measure continuation quality and semantic compression.</td></tr>
+    <tr><td class="high">High</td><td>False memories mislead agents.</td><td>Store confidence and provenance; prefer “unknown” over invented continuity.</td></tr>
+    <tr><td class="high">High</td><td>Mac App Store constraints.</td><td>Accessibility-based assistive behavior is incompatible with App Sandbox; plan Developer ID distribution outside the Store.</td></tr>
+    <tr><td>Medium</td><td>Always-on resource cost.</td><td>Event-driven capture, bounded queues, retention tiers, and 24-hour soak tests.</td></tr>
+  </table>
+
+  <h2>Validation gates before a full build</h2>
+  <ul>
+    <li>Interview 5–10 developers who use at least two agents weekly; collect real examples of lost context.</li>
+    <li>At least 3 users install a rough prototype and leave it enabled for a week.</li>
+    <li>For 20 manually labeled task resumptions, the system identifies the correct project, last meaningful action, and next step at least 80% of the time.</li>
+    <li>Raw-to-retrieved context compression of at least 20× without losing the answer.</li>
+    <li>No known sensitive-field events persisted in a deliberate red-team test.</li>
+    <li>Background target: under 2% average CPU, under 250 MB steady-state memory, and under 100 MB/day for the event-only MVP.</li>
+  </ul>
+
+  <h2>Current machine readiness</h2>
+  <table>
+    <tr><th>Item</th><th>Status</th></tr>
+    <tr><td>Mac</td><td>Apple M2, 8 GB RAM, macOS 26.0.1 — sufficient for an event-only MVP</td></tr>
+    <tr><td>Swift / command-line tools</td><td>Installed: Swift 6.2.3 and Apple Command Line Tools</td></tr>
+    <tr><td>Full Xcode</td><td class="critical">Missing</td></tr>
+    <tr><td>Disk</td><td class="critical">Only ~15 GiB free; free roughly 35–50 GiB for Xcode, SDKs, builds, and DerivedData</td></tr>
+    <tr><td>Git, Homebrew, SQLite, Node, Python, Docker, Rust</td><td>Installed (Docker/Rust are not needed for the Swift MVP)</td></tr>
+    <tr><td>Ollama/local model runner</td><td>Missing, optional, and not recommended for the first capture prototype on an 8 GB Mac</td></tr>
+    <tr><td>Apple Developer membership</td><td>Not needed for local development; needed later for Developer ID signing/notarized public distribution</td></tr>
+  </table>
+
+  <h2>Sources</h2>
+  <ul>
+    <li><a href="https://help.openai.com/en/articles/6825453-chatgpt-release-notes">OpenAI: Computer History for macOS</a></li>
+    <li><a href="https://github.com/dp466/screenpipe">Screenpipe repository and architecture</a></li>
+    <li><a href="https://github.com/dp466/screenpipe/issues/2285">Screenpipe issue: redundant OCR wastes agent context</a></li>
+    <li><a href="https://developer.apple.com/documentation/security/protecting-user-data-with-app-sandbox">Apple: Accessibility APIs and App Sandbox constraints</a></li>
+    <li><a href="https://developer.apple.com/xcode/system-requirements">Apple: Xcode system requirements</a></li>
+    <li><a href="https://github.com/modelcontextprotocol/swift-sdk">Official MCP Swift SDK</a></li>
+  </ul>
+  <footer>Validation prepared 23 August 2026. Verdict: prototype the semantic continuity wedge; do not build a broad capture clone yet.</footer>
+</main></body></html>
