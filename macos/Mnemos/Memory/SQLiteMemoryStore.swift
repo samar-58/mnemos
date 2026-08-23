@@ -244,6 +244,11 @@ actor SQLiteMemoryStore {
         return evidence.reversed()
     }
 
+    func episode(id: String) throws -> MemoryEpisode? {
+        try prepareIfNeeded()
+        return try episode(withID: id)
+    }
+
     private func configureDatabase() throws {
         try execute("PRAGMA journal_mode = WAL")
         try execute("PRAGMA foreign_keys = ON")

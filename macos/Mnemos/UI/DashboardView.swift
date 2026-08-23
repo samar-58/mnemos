@@ -31,11 +31,7 @@ struct DashboardView: View {
         case .permissions:
             PermissionsView()
         case .agents:
-            PlaceholderSection(
-                title: "Agents",
-                subtitle: "Next milestone: authenticated local retrieval for Codex, Claude, and Cursor through a stdio MCP adapter.",
-                symbol: "point.3.connected.trianglepath.dotted"
-            )
+            AgentAccessView()
         case .settings:
             PlaceholderSection(
                 title: "Settings",
@@ -107,7 +103,12 @@ private struct OverviewView: View {
                         detail: "SQLite, deterministic episodes, FTS5 retrieval, and evidence drill-down"
                     )
                     Divider().padding(.leading, 48)
-                    MilestoneRow(symbol: "circle", color: .secondary, title: "Agent access", detail: "Authenticated API and stdio MCP adapter")
+                    MilestoneRow(
+                        symbol: "circle.lefthalf.filled",
+                        color: .blue,
+                        title: "Agent access",
+                        detail: "Authenticated local API is ready; stdio MCP adapter is next"
+                    )
                 }
                 .cardStyle()
 
@@ -468,6 +469,122 @@ private struct MemoryEpisodeDetail: View {
             .padding(22)
             .frame(maxWidth: 760, alignment: .leading)
         }
+    }
+}
+
+private struct AgentAccessView: View {
+    @EnvironmentObject private var model: AppModel
+
+    private var statusColor: Color {
+        switch model.agentAPIStatus {
+        case .running: .green
+        case .starting: .orange
+        case .failed: .red
+        case .stopped: .secondary
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.title2)
+                            .foregroundStyle(.blue)
+                            .frame(width: 38, height: 38)
+                            .background(.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Local agent access").font(.headline)
+                            Text("Allow local adapters to retrieve evidence-backed memory while Mnemos is running.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle(
+                            "Enable",
+                            isOn: Binding(
+                                get: { model.agentAccessEnabled },
+                                set: { model.setAgentAccessEnabled($0) }
+                            )
+                        )
+                        .labelsHidden()
+                    }
+
+                    Divider()
+
+                    HStack(spacing: 9) {
+                        Circle().fill(statusColor).frame(width: 9, height: 9)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.agentAPIStatus.label).font(.subheadline.weight(.semibold))
+                            Text(model.agentAPIStatus.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if model.agentAccessEnabled {
+                            Button("Restart") { model.restartAgentAPI() }
+                        }
+                    }
+                }
+                .cardStyle()
+
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionHeading(
+                        title: "Read-only API contract",
+                        subtitle: "The upcoming TypeScript stdio MCP adapter will call these endpoints; agents never open SQLite."
+                    )
+                    Divider()
+                    AgentEndpointRow(method: "GET", path: "/v1/health", detail: "Storage health and counts")
+                    Divider().padding(.leading, 78)
+                    AgentEndpointRow(method: "GET", path: "/v1/episodes/recent", detail: "Recent memory episodes")
+                    Divider().padding(.leading, 78)
+                    AgentEndpointRow(method: "GET", path: "/v1/search?q=…", detail: "Ranked episode retrieval")
+                    Divider().padding(.leading, 78)
+                    AgentEndpointRow(method: "GET", path: "/v1/episodes/{id}", detail: "One episode summary")
+                    Divider().padding(.leading, 78)
+                    AgentEndpointRow(method: "GET", path: "/v1/episodes/{id}/evidence", detail: "Supporting observations")
+                }
+                .cardStyle()
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("Connection handoff", systemImage: "key.horizontal.fill")
+                        .font(.headline)
+                    Text("When enabled, Mnemos rotates a 256-bit bearer token on every launch and writes the endpoint configuration here:")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Text(model.agentConfigurationPath)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Text("The file is readable only by your macOS account. For this prototype, enabling access authorizes every process running as that account—not individual agents. The listener is bound to 127.0.0.1, rejects unauthenticated requests, accepts only GET requests, caps request and result sizes, and sends no browser CORS permission.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .cardStyle()
+            }
+            .padding(30)
+            .frame(maxWidth: 900, alignment: .leading)
+        }
+        .navigationTitle("Agents")
+    }
+}
+
+private struct AgentEndpointRow: View {
+    let method: String
+    let path: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(method)
+                .font(.caption.monospaced().weight(.bold))
+                .foregroundStyle(.blue)
+                .frame(width: 44)
+            Text(path).font(.subheadline.monospaced())
+            Spacer()
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 11)
     }
 }
 

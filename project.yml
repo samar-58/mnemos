@@ -23,6 +23,8 @@ targets:
       - path: macos/Mnemos
     dependencies:
       - sdk: libsqlite3.tbd
+      - sdk: Network.framework
+      - sdk: Security.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.mnemos.app

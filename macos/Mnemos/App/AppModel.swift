@@ -47,10 +47,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var selectedEpisodeEvidence: [EpisodeEvidence] = []
     @Published private(set) var memoryError: String?
     @Published private(set) var isMemorySearching = false
+    @Published private(set) var agentAccessEnabled: Bool
+    @Published private(set) var agentAPIStatus: AgentAPIStatus = .stopped
+    @Published private(set) var agentConfigurationPath = ""
 
     let launchedAt = Date.now
     private let captureService = AccessibilityCaptureService()
-    private let memoryStore = SQLiteMemoryStore()
+    private let memoryStore: SQLiteMemoryStore
+    private let agentAPI: LocalMemoryAPI
     private var monitorTask: Task<Void, Never>?
     private var persistenceTask: Task<Void, Never>?
     private var tickCount = 0
@@ -59,16 +63,30 @@ final class AppModel: ObservableObject {
 
     private static let allowedApplicationsKey = "allowedApplicationBundleIDs"
     private static let allowedDomainsKey = "allowedURLDomains"
+    private static let agentAccessEnabledKey = "agentAccessEnabled"
 
     init() {
+        let memoryStore = SQLiteMemoryStore()
+        self.memoryStore = memoryStore
+        agentAPI = LocalMemoryAPI(memoryStore: memoryStore)
         allowedBundleIDs = Set(UserDefaults.standard.stringArray(forKey: Self.allowedApplicationsKey) ?? [])
         allowedDomains = Set(
             (UserDefaults.standard.stringArray(forKey: Self.allowedDomainsKey) ?? [])
                 .compactMap(CapturePrivacy.normalizedDomain)
         )
+        agentAccessEnabled = UserDefaults.standard.bool(forKey: Self.agentAccessEnabledKey)
         refreshAvailableApplications()
         if !accessibilityTrusted { status = .permissionRequired }
         refreshMemory()
+        Task { [weak self] in
+            guard let self else { return }
+            if agentAccessEnabled {
+                await agentAPI.start()
+            } else {
+                await agentAPI.stop()
+            }
+            refreshAgentAPIStatus()
+        }
 
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -237,6 +255,30 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setAgentAccessEnabled(_ enabled: Bool) {
+        agentAccessEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.agentAccessEnabledKey)
+        Task { [weak self] in
+            guard let self else { return }
+            if enabled {
+                await agentAPI.start()
+            } else {
+                await agentAPI.stop()
+            }
+            refreshAgentAPIStatus()
+        }
+    }
+
+    func restartAgentAPI() {
+        guard agentAccessEnabled else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await agentAPI.stop()
+            await agentAPI.start()
+            refreshAgentAPIStatus()
+        }
+    }
+
     private func tick() {
         let trusted = AccessibilityCaptureService.isTrusted
         if trusted != accessibilityTrusted {
@@ -253,6 +295,15 @@ final class AppModel: ObservableObject {
 
         tickCount += 1
         if tickCount.isMultiple(of: 5) { refreshAvailableApplications() }
+        refreshAgentAPIStatus()
+    }
+
+    private func refreshAgentAPIStatus() {
+        Task { [weak self] in
+            guard let self else { return }
+            agentAPIStatus = await agentAPI.currentStatus()
+            agentConfigurationPath = await agentAPI.configurationPath()
+        }
     }
 
     private func record(_ event: CapturedEvent) {
@@ -298,7 +349,10 @@ final class AppModel: ObservableObject {
     }
 
     func quit() {
-        NSApp.terminate(nil)
+        Task {
+            await agentAPI.stop()
+            NSApp.terminate(nil)
+        }
     }
 }
 

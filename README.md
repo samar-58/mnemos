@@ -40,7 +40,7 @@ Swift will own collection, privacy policy, persistence, and product behavior. Th
 
 ## Current status
 
-The first three prototype milestones are implemented:
+The first four prototype milestones are implemented:
 
 - Swift 6 and SwiftUI macOS application
 - Menu-bar app experience
@@ -60,9 +60,13 @@ The first three prototype milestones are implemented:
 - Ranked FTS5 search across both episode summaries and supporting observations
 - In-app Memory inspector with provenance drill-down
 - 30-day raw-observation retention; derived episodes are kept separately
+- Off-by-default, read-only agent access over an authenticated IPv4 loopback API
+- Per-launch 256-bit bearer tokens handed to adapters through a user-only configuration file
 - Reproducible Xcode project generation
 
 The prototype database lives in `~/Library/Application Support/Mnemos/mnemos.sqlite`. It is restricted to the current macOS user and benefits from macOS/FileVault protection when FileVault is enabled. Application-level database encryption is not implemented yet and is required before a public alpha.
+
+When local agent access is enabled in Mnemos, the app listens only on `127.0.0.1:17373` and writes a short-lived connection configuration to `~/Library/Application Support/Mnemos/agent-api.json`. The configuration file is mode `600`, the token rotates whenever the server starts, and the API is read-only. The future MCP adapter will read this file and call the Swift-owned retrieval API; it will not open the database. Prototype authorization is account-wide: any process running as the same macOS user can read this configuration while access is enabled. Per-agent grants are required before public alpha.
 
 ## Requirements
 
@@ -109,11 +113,11 @@ mnemos/
 1. Native macOS shell and menu-bar experience — complete
 2. Accessibility onboarding and semantic event-stream capture — complete for the in-memory prototype
 3. Local storage, deterministic episodes, and FTS5 retrieval — complete for the prototype
-4. Authenticated loopback API
+4. Authenticated loopback API — complete for the prototype
 5. TypeScript stdio MCP adapter
 6. Codex, Claude, and Cursor dogfood integration
 
-The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed. Application-level database encryption, authenticated agent access, and configurable retention are still pending.
+The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed. Application-level database encryption, per-agent authorization, and configurable retention are still pending.
 
 ## License
 

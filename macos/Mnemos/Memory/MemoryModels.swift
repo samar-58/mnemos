@@ -1,6 +1,6 @@
 import Foundation
 
-struct MemoryEpisode: Identifiable, Equatable, Sendable {
+struct MemoryEpisode: Identifiable, Equatable, Codable, Sendable {
     let id: String
     let startedAt: Date
     let endedAt: Date
@@ -15,7 +15,7 @@ struct MemoryEpisode: Identifiable, Equatable, Sendable {
     let isOpen: Bool
 }
 
-struct MemorySearchResult: Identifiable, Equatable, Sendable {
+struct MemorySearchResult: Identifiable, Equatable, Codable, Sendable {
     let episode: MemoryEpisode
     let score: Double
     let highlights: [String]
@@ -23,7 +23,7 @@ struct MemorySearchResult: Identifiable, Equatable, Sendable {
     var id: String { episode.id }
 }
 
-struct EpisodeEvidence: Identifiable, Equatable, Sendable {
+struct EpisodeEvidence: Identifiable, Equatable, Codable, Sendable {
     let id: String
     let timestamp: Date
     let kind: String
