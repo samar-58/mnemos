@@ -36,11 +36,11 @@ TypeScript MCP adapter
  Codex  Claude Cursor
 ```
 
-Swift will own collection, privacy policy, persistence, and product behavior. The future TypeScript process will be a stateless stdio MCP adapter; it will never open the database directly.
+Swift owns collection, privacy policy, persistence, and product behavior. The TypeScript process is a stateless stdio MCP adapter; it never opens the database directly.
 
 ## Current status
 
-The first four prototype milestones are implemented:
+The first five prototype milestones are implemented:
 
 - Swift 6 and SwiftUI macOS application
 - Menu-bar app experience
@@ -62,16 +62,19 @@ The first four prototype milestones are implemented:
 - 30-day raw-observation retention; derived episodes are kept separately
 - Off-by-default, read-only agent access over an authenticated IPv4 loopback API
 - Per-launch 256-bit bearer tokens handed to adapters through a user-only configuration file
+- TypeScript stdio MCP adapter with `search_memory`, `recent_activity`, `get_episode`, and `get_evidence`
+- Structured MCP results, read-only annotations, provenance IDs, and explicit prompt-injection boundaries
 - Reproducible Xcode project generation
 
 The prototype database lives in `~/Library/Application Support/Mnemos/mnemos.sqlite`. It is restricted to the current macOS user and benefits from macOS/FileVault protection when FileVault is enabled. Application-level database encryption is not implemented yet and is required before a public alpha.
 
-When local agent access is enabled in Mnemos, the app listens only on `127.0.0.1:17373` and writes a short-lived connection configuration to `~/Library/Application Support/Mnemos/agent-api.json`. The configuration file is mode `600`, the token rotates whenever the server starts, and the API is read-only. The future MCP adapter will read this file and call the Swift-owned retrieval API; it will not open the database. Prototype authorization is account-wide: any process running as the same macOS user can read this configuration while access is enabled. Per-agent grants are required before public alpha.
+When local agent access is enabled in Mnemos, the app listens only on `127.0.0.1:17373` and writes a short-lived connection configuration to `~/Library/Application Support/Mnemos/agent-api.json`. The configuration file is mode `600`, the token rotates whenever the server starts, and the API is read-only. The MCP adapter reloads this file for every tool call and calls the Swift-owned retrieval API; it does not open the database. Prototype authorization is account-wide: any process running as the same macOS user can read this configuration while access is enabled. Per-agent grants are required before public alpha.
 
 ## Requirements
 
 - macOS 15 or later
 - Xcode 26 or later
+- Node.js 20 or later
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 Install XcodeGen with Homebrew:
@@ -98,12 +101,33 @@ make open
 
 The generated `macos/Mnemos.xcodeproj` is intentionally ignored. [`project.yml`](project.yml) is the source of truth, which avoids noisy Xcode project-file conflicts.
 
+Build and verify the MCP adapter:
+
+```sh
+cd mcp
+npm ci
+npm run build
+npm run smoke
+```
+
+Register the compiled adapter with local hosts:
+
+```sh
+MNEMOS_NODE_BIN="$(command -v node)"
+MNEMOS_ADAPTER="$(pwd)/build/index.js"
+codex mcp add mnemos -- "$MNEMOS_NODE_BIN" "$MNEMOS_ADAPTER"
+claude mcp add --scope user --transport stdio mnemos -- "$MNEMOS_NODE_BIN" "$MNEMOS_ADAPTER"
+cursor --add-mcp "{\"name\":\"mnemos\",\"command\":\"$MNEMOS_NODE_BIN\",\"args\":[\"$MNEMOS_ADAPTER\"]}"
+```
+
+Restart the host after registration, then enable **Agents → Local agent access** in Mnemos. Registration alone does not grant memory access.
+
 ## Repository structure
 
 ```text
 mnemos/
 ├── macos/Mnemos/            # SwiftUI application source
-├── docs/                    # Product and architecture notes
+├── mcp/                     # TypeScript stdio MCP adapter
 ├── project.yml              # XcodeGen project definition
 └── Makefile                 # Local development commands
 ```
@@ -114,8 +138,8 @@ mnemos/
 2. Accessibility onboarding and semantic event-stream capture — complete for the in-memory prototype
 3. Local storage, deterministic episodes, and FTS5 retrieval — complete for the prototype
 4. Authenticated loopback API — complete for the prototype
-5. TypeScript stdio MCP adapter
-6. Codex, Claude, and Cursor dogfood integration
+5. TypeScript stdio MCP adapter — complete for the prototype
+6. Codex, Claude, and Cursor dogfood integration — configured locally
 
 The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed. Application-level database encryption, per-agent authorization, and configurable retention are still pending.
 

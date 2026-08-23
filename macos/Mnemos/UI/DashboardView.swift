@@ -104,10 +104,10 @@ private struct OverviewView: View {
                     )
                     Divider().padding(.leading, 48)
                     MilestoneRow(
-                        symbol: "circle.lefthalf.filled",
-                        color: .blue,
+                        symbol: "checkmark.circle.fill",
+                        color: .green,
                         title: "Agent access",
-                        detail: "Authenticated local API is ready; stdio MCP adapter is next"
+                        detail: "Authenticated local API and TypeScript stdio MCP adapter"
                     )
                 }
                 .cardStyle()
@@ -505,7 +505,12 @@ private struct AgentAccessView: View {
                             "Enable",
                             isOn: Binding(
                                 get: { model.agentAccessEnabled },
-                                set: { model.setAgentAccessEnabled($0) }
+                                set: { enabled in
+                                    Task { @MainActor in
+                                        await Task.yield()
+                                        model.setAgentAccessEnabled(enabled)
+                                    }
+                                }
                             )
                         )
                         .labelsHidden()
@@ -530,7 +535,7 @@ private struct AgentAccessView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     SectionHeading(
                         title: "Read-only API contract",
-                        subtitle: "The upcoming TypeScript stdio MCP adapter will call these endpoints; agents never open SQLite."
+                        subtitle: "The TypeScript stdio MCP adapter calls these endpoints; agents never open SQLite."
                     )
                     Divider()
                     AgentEndpointRow(method: "GET", path: "/v1/health", detail: "Storage health and counts")

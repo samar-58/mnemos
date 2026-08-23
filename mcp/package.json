@@ -1,0 +1,28 @@
+{
+  "name": "@mnemos/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Read-only stdio MCP adapter for the Mnemos macOS memory service",
+  "type": "module",
+  "bin": {
+    "mnemos-mcp": "build/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "start": "node build/index.js",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "24.5.2",
+    "typescript": "5.9.2"
+  }
+}

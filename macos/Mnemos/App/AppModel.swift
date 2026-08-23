@@ -256,6 +256,7 @@ final class AppModel: ObservableObject {
     }
 
     func setAgentAccessEnabled(_ enabled: Bool) {
+        guard enabled != agentAccessEnabled else { return }
         agentAccessEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.agentAccessEnabledKey)
         Task { [weak self] in
@@ -301,8 +302,12 @@ final class AppModel: ObservableObject {
     private func refreshAgentAPIStatus() {
         Task { [weak self] in
             guard let self else { return }
-            agentAPIStatus = await agentAPI.currentStatus()
-            agentConfigurationPath = await agentAPI.configurationPath()
+            let status = await agentAPI.currentStatus()
+            let configurationPath = await agentAPI.configurationPath()
+            if status != agentAPIStatus { agentAPIStatus = status }
+            if configurationPath != agentConfigurationPath {
+                agentConfigurationPath = configurationPath
+            }
         }
     }
 
