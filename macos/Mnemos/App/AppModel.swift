@@ -36,11 +36,26 @@ final class AppModel: ObservableObject {
     @Published private(set) var allowedDomains: Set<String>
     @Published private(set) var events: [CapturedEvent] = []
     @Published private(set) var captureMessage: String?
+    @Published private(set) var memoryHealth = MemoryStoreHealth(
+        state: .unavailable("Starting local memory…"),
+        observationCount: 0,
+        episodeCount: 0
+    )
+    @Published private(set) var recentEpisodes: [MemoryEpisode] = []
+    @Published private(set) var memorySearchResults: [MemorySearchResult] = []
+    @Published private(set) var selectedEpisode: MemoryEpisode?
+    @Published private(set) var selectedEpisodeEvidence: [EpisodeEvidence] = []
+    @Published private(set) var memoryError: String?
+    @Published private(set) var isMemorySearching = false
 
     let launchedAt = Date.now
     private let captureService = AccessibilityCaptureService()
+    private let memoryStore = SQLiteMemoryStore()
     private var monitorTask: Task<Void, Never>?
+    private var persistenceTask: Task<Void, Never>?
     private var tickCount = 0
+    private var persistedSinceRefresh = 0
+    private var searchGeneration = 0
 
     private static let allowedApplicationsKey = "allowedApplicationBundleIDs"
     private static let allowedDomainsKey = "allowedURLDomains"
@@ -53,6 +68,7 @@ final class AppModel: ObservableObject {
         )
         refreshAvailableApplications()
         if !accessibilityTrusted { status = .permissionRequired }
+        refreshMemory()
 
         monitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -153,6 +169,74 @@ final class AppModel: ObservableObject {
         events.removeAll()
     }
 
+    func refreshMemory() {
+        Task { [weak self] in
+            guard let self else { return }
+            let health = await memoryStore.health()
+            do {
+                let episodes = try await memoryStore.recentEpisodes()
+                memoryHealth = health
+                recentEpisodes = episodes
+                memoryError = nil
+                if let selectedEpisode,
+                   let refreshed = episodes.first(where: { $0.id == selectedEpisode.id }) {
+                    self.selectedEpisode = refreshed
+                }
+            } catch {
+                memoryHealth = health
+                memoryError = error.localizedDescription
+            }
+        }
+    }
+
+    func searchMemory(_ query: String) {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchGeneration += 1
+        let generation = searchGeneration
+
+        guard !normalized.isEmpty else {
+            memorySearchResults = []
+            isMemorySearching = false
+            return
+        }
+
+        isMemorySearching = true
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let results = try await memoryStore.search(normalized)
+                guard generation == searchGeneration else { return }
+                memorySearchResults = results
+                memoryError = nil
+                isMemorySearching = false
+            } catch {
+                guard generation == searchGeneration else { return }
+                memorySearchResults = []
+                memoryError = error.localizedDescription
+                isMemorySearching = false
+            }
+        }
+    }
+
+    func selectEpisode(_ episode: MemoryEpisode?) {
+        selectedEpisode = episode
+        selectedEpisodeEvidence = []
+        guard let episode else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let evidence = try await memoryStore.evidence(for: episode.id)
+                guard selectedEpisode?.id == episode.id else { return }
+                selectedEpisodeEvidence = evidence
+                memoryError = nil
+            } catch {
+                guard selectedEpisode?.id == episode.id else { return }
+                memoryError = error.localizedDescription
+            }
+        }
+    }
+
     private func tick() {
         let trusted = AccessibilityCaptureService.isTrusted
         if trusted != accessibilityTrusted {
@@ -174,6 +258,31 @@ final class AppModel: ObservableObject {
     private func record(_ event: CapturedEvent) {
         events.insert(event, at: 0)
         if events.count > 500 { events.removeLast(events.count - 500) }
+
+        let previous = persistenceTask
+        persistenceTask = Task { [weak self] in
+            _ = await previous?.value
+            guard let self else { return }
+            do {
+                try await memoryStore.record(event)
+                persistedSinceRefresh += 1
+                if persistedSinceRefresh >= 5 || selectedSection == .memory {
+                    persistedSinceRefresh = 0
+                    let health = await memoryStore.health()
+                    let episodes = try await memoryStore.recentEpisodes()
+                    memoryHealth = health
+                    recentEpisodes = episodes
+                    memoryError = nil
+                }
+            } catch {
+                memoryError = error.localizedDescription
+                memoryHealth = MemoryStoreHealth(
+                    state: .unavailable(error.localizedDescription),
+                    observationCount: memoryHealth.observationCount,
+                    episodeCount: memoryHealth.episodeCount
+                )
+            }
+        }
     }
 
     private func saveAllowedDomains() {
@@ -196,6 +305,7 @@ final class AppModel: ObservableObject {
 enum SidebarSection: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case activity = "Activity"
+    case memory = "Memory"
     case permissions = "Permissions"
     case agents = "Agents"
     case settings = "Settings"
@@ -206,6 +316,7 @@ enum SidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "rectangle.grid.2x2"
         case .activity: "clock.arrow.circlepath"
+        case .memory: "brain.head.profile"
         case .permissions: "hand.raised"
         case .agents: "point.3.connected.trianglepath.dotted"
         case .settings: "gearshape"

@@ -5,7 +5,7 @@ Mnemos is an open-source, local-first memory layer for AI agents on macOS.
 The long-term goal is simple: your computer context should belong to you, and authorized agents such as Codex, Claude, and Cursor should be able to retrieve the same useful, provenance-backed memory.
 
 > [!IMPORTANT]
-> This repository is an early prototype. Mnemos captures a privacy-filtered semantic event stream from explicitly allowed applications using macOS Accessibility APIs. Events currently remain in memory and disappear when the app quits.
+> This repository is an early prototype. Mnemos captures a privacy-filtered semantic event stream from explicitly allowed applications using macOS Accessibility APIs, persists it locally, groups it into deterministic episodes, and provides evidence-backed full-text retrieval.
 
 ## Product principles
 
@@ -23,7 +23,7 @@ Swift macOS app
 ├── Native UI and permissions
 ├── Accessibility collector
 ├── Privacy filtering
-├── Encrypted SQLite / FTS5 storage
+├── Private local SQLite / FTS5 storage
 ├── Episode and memory engine
 └── Authenticated loopback API
           ▲
@@ -40,7 +40,7 @@ Swift will own collection, privacy policy, persistence, and product behavior. Th
 
 ## Current status
 
-The first two prototype milestones are implemented:
+The first three prototype milestones are implemented:
 
 - Swift 6 and SwiftUI macOS application
 - Menu-bar app experience
@@ -55,9 +55,14 @@ The first two prototype milestones are implemented:
 - Browser URL/content capture behind independent domain allowlisting
 - Private-window, secure-input, password-field, disallowed-app, and disallowed-domain rejection
 - Rolling duplicate suppression and common credential-pattern redaction
+- Swift-owned SQLite persistence with schema migrations and private filesystem permissions
+- Deterministic activity episodes with application, project, artifact, and last-state context
+- Ranked FTS5 search across both episode summaries and supporting observations
+- In-app Memory inspector with provenance drill-down
+- 30-day raw-observation retention; derived episodes are kept separately
 - Reproducible Xcode project generation
 
-No activity is written to disk yet.
+The prototype database lives in `~/Library/Application Support/Mnemos/mnemos.sqlite`. It is restricted to the current macOS user and benefits from macOS/FileVault protection when FileVault is enabled. Application-level database encryption is not implemented yet and is required before a public alpha.
 
 ## Requirements
 
@@ -103,12 +108,12 @@ mnemos/
 
 1. Native macOS shell and menu-bar experience — complete
 2. Accessibility onboarding and semantic event-stream capture — complete for the in-memory prototype
-3. Encrypted storage and deterministic episodes
+3. Local storage, deterministic episodes, and FTS5 retrieval — complete for the prototype
 4. Authenticated loopback API
 5. TypeScript stdio MCP adapter
 6. Codex, Claude, and Cursor dogfood integration
 
-The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed.
+The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed. Application-level database encryption, authenticated agent access, and configurable retention are still pending.
 
 ## License
 

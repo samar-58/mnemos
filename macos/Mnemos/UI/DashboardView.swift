@@ -26,12 +26,14 @@ struct DashboardView: View {
             OverviewView()
         case .activity:
             ActivityView()
+        case .memory:
+            MemoryView()
         case .permissions:
             PermissionsView()
         case .agents:
             PlaceholderSection(
                 title: "Agents",
-                subtitle: "Codex, Claude, and Cursor connections will be added after local storage and retrieval work.",
+                subtitle: "Next milestone: authenticated local retrieval for Codex, Claude, and Cursor through a stdio MCP adapter.",
                 symbol: "point.3.connected.trianglepath.dotted"
             )
         case .settings:
@@ -82,12 +84,12 @@ private struct OverviewView: View {
 
                 LazyVGrid(columns: columns, spacing: 14) {
                     MetricCard(title: "Capture", value: model.status.rawValue, symbol: model.status.menuBarSymbol)
-                    MetricCard(title: "Observations", value: "\(model.events.count)", symbol: "text.append")
+                    MetricCard(title: "Stored observations", value: "\(model.memoryHealth.observationCount)", symbol: "text.append")
                     MetricCard(title: "Allowed apps", value: "\(model.allowedBundleIDs.count)", symbol: "checkmark.shield")
                 }
 
                 VStack(alignment: .leading, spacing: 0) {
-                    SectionHeading(title: "Prototype status", subtitle: "Live events remain in memory and disappear when Mnemos quits")
+                    SectionHeading(title: "Prototype status", subtitle: "Semantic events and episodes now persist locally across launches")
 
                     MilestoneRow(symbol: "checkmark.circle.fill", color: .green, title: "Native macOS shell", detail: "SwiftUI dashboard and menu-bar controls")
                     Divider().padding(.leading, 48)
@@ -98,7 +100,12 @@ private struct OverviewView: View {
                         detail: "AX notifications, input targets, tree diffs, and secure-field rejection"
                     )
                     Divider().padding(.leading, 48)
-                    MilestoneRow(symbol: "circle", color: .secondary, title: "Local memory", detail: "Encrypted SQLite, episodes, and retrieval")
+                    MilestoneRow(
+                        symbol: model.memoryHealth.label == "Ready" ? "checkmark.circle.fill" : "exclamationmark.circle.fill",
+                        color: model.memoryHealth.label == "Ready" ? .green : .orange,
+                        title: "Local memory",
+                        detail: "SQLite, deterministic episodes, FTS5 retrieval, and evidence drill-down"
+                    )
                     Divider().padding(.leading, 48)
                     MilestoneRow(symbol: "circle", color: .secondary, title: "Agent access", detail: "Authenticated API and stdio MCP adapter")
                 }
@@ -175,7 +182,7 @@ private struct ActivityView: View {
                 ContentUnavailableView(
                     "No captured activity",
                     systemImage: "clock.arrow.circlepath",
-                    description: Text("Grant Accessibility access, allow an application, and start capture. Events stay in memory for this prototype.")
+                    description: Text("Grant Accessibility access, allow an application, and start capture. New events also persist in local memory.")
                 )
             } else {
                 List(model.events) { event in
@@ -246,9 +253,236 @@ private struct ActivityView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button(model.isRunning ? "Pause" : "Start") { model.toggleCapture() }
-                Button("Clear") { model.clearEvents() }
+                Button("Clear view") { model.clearEvents() }
                     .disabled(model.events.isEmpty)
             }
+        }
+    }
+}
+
+private struct MemoryView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var query = ""
+
+    private var isSearching: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var episodes: [MemoryEpisode] {
+        isSearching ? model.memorySearchResults.map(\.episode) : model.recentEpisodes
+    }
+
+    private var selection: Binding<String?> {
+        Binding(
+            get: { model.selectedEpisode?.id },
+            set: { id in model.selectEpisode(episodes.first(where: { $0.id == id })) }
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                TextField("Search projects, windows, URLs, terminal output, or typed context", text: $query)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { model.searchMemory(query) }
+                    .onChange(of: query) { _, newValue in
+                        if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            model.searchMemory("")
+                        }
+                    }
+                Button("Search") { model.searchMemory(query) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!isSearching || model.isMemorySearching)
+                Button { model.refreshMemory() } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Refresh memory")
+            }
+            .padding(16)
+
+            Divider()
+
+            HSplitView {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(isSearching ? "Search results" : "Recent episodes")
+                                .font(.headline)
+                            Text(model.memoryHealth.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if model.isMemorySearching {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    .padding(14)
+
+                    if let error = model.memoryError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 10)
+                    }
+
+                    if episodes.isEmpty && !model.isMemorySearching {
+                        ContentUnavailableView(
+                            isSearching ? "No matching memory" : "No episodes yet",
+                            systemImage: isSearching ? "magnifyingglass" : "brain.head.profile",
+                            description: Text(isSearching ? "Try broader terms." : "Start capture and Mnemos will group observations into episodes.")
+                        )
+                    } else {
+                        List(episodes, selection: selection) { episode in
+                            MemoryEpisodeRow(
+                                episode: episode,
+                                highlights: model.memorySearchResults.first(where: { $0.id == episode.id })?.highlights ?? []
+                            )
+                            .tag(episode.id)
+                        }
+                        .listStyle(.inset)
+                    }
+                }
+                .frame(minWidth: 330, idealWidth: 430)
+
+                Group {
+                    if let episode = model.selectedEpisode {
+                        MemoryEpisodeDetail(episode: episode, evidence: model.selectedEpisodeEvidence)
+                    } else {
+                        ContentUnavailableView(
+                            "Select an episode",
+                            systemImage: "doc.text.magnifyingglass",
+                            description: Text("Inspect the episode summary and the observations that support it.")
+                        )
+                    }
+                }
+                .frame(minWidth: 420, maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .navigationTitle("Memory")
+        .onAppear { model.refreshMemory() }
+    }
+}
+
+private struct MemoryEpisodeRow: View {
+    let episode: MemoryEpisode
+    let highlights: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(episode.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                if episode.isOpen {
+                    Text("Live")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.green.opacity(0.12), in: Capsule())
+                }
+                Spacer()
+                Text(episode.endedAt, format: .dateTime.hour().minute())
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Text(episode.summary)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            if let highlight = highlights.first {
+                Text(highlight)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 8) {
+                Label("\(episode.eventCount)", systemImage: "text.append")
+                if let project = episode.projectKey {
+                    Label(project, systemImage: "folder")
+                        .lineLimit(1)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 5)
+    }
+}
+
+private struct MemoryEpisodeDetail: View {
+    let episode: MemoryEpisode
+    let evidence: [EpisodeEvidence]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(episode.title).font(.title2.weight(.semibold))
+                    Text(episode.summary).foregroundStyle(.secondary)
+                    Text(episode.startedAt, format: .dateTime.day().month().year().hour().minute())
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+
+                if let state = episode.lastState {
+                    DetailBlock(title: "Last known state", value: state, symbol: "flag.checkered")
+                }
+                if !episode.applications.isEmpty {
+                    DetailBlock(title: "Applications", value: episode.applications.joined(separator: ", "), symbol: "app.dashed")
+                }
+                if !episode.artifacts.isEmpty {
+                    DetailBlock(title: "Artifacts", value: episode.artifacts.joined(separator: "\n"), symbol: "link")
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Evidence").font(.headline)
+                    if evidence.isEmpty {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        ForEach(evidence) { item in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(item.applicationName).font(.subheadline.weight(.medium))
+                                    Text(item.kind).font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text(item.timestamp, format: .dateTime.hour().minute().second())
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(.tertiary)
+                                }
+                                if let title = item.windowTitle { Text(title).font(.subheadline).lineLimit(2) }
+                                if let detail = item.detail { Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                                if let target = item.target { Text(target).font(.caption2).foregroundStyle(.tertiary) }
+                                if let artifact = item.url ?? item.documentPath {
+                                    Text(artifact).font(.caption2.monospaced()).foregroundStyle(.tertiary).textSelection(.enabled)
+                                }
+                            }
+                            .padding(10)
+                            .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+            }
+            .padding(22)
+            .frame(maxWidth: 760, alignment: .leading)
+        }
+    }
+}
+
+private struct DetailBlock: View {
+    let title: String
+    let value: String
+    let symbol: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(title, systemImage: symbol).font(.headline)
+            Text(value)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
         }
     }
 }
@@ -360,7 +594,7 @@ private struct PermissionsView: View {
                 }
                 .cardStyle()
 
-                Text("Prototype boundary: Mnemos records semantic keyboard text and shortcuts, mouse targets, focused controls, bounded Accessibility-tree snapshots/diffs, selected text, window/document context, terminal changes, and allowed browser URLs/content. Secure input, password controls, private browser windows, disallowed apps/domains, clipboard contents, screenshots, audio, and OCR are excluded. Common credential patterns are redacted. Everything remains in memory until Mnemos quits.")
+                Text("Prototype boundary: Mnemos records semantic keyboard text and shortcuts, mouse targets, focused controls, bounded Accessibility-tree snapshots/diffs, selected text, window/document context, terminal changes, and allowed browser URLs/content. Secure input, password controls, private browser windows, disallowed apps/domains, clipboard contents, screenshots, audio, and OCR are excluded. Common credential patterns are redacted. Allowed events persist locally with 30-day raw-observation retention; derived episodes remain available for retrieval.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

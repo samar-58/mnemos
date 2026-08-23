@@ -1,6 +1,6 @@
 import Foundation
 
-struct CapturableApplication: Identifiable, Hashable {
+struct CapturableApplication: Identifiable, Hashable, Sendable {
     let bundleID: String
     let name: String
     let processIdentifier: pid_t
@@ -9,7 +9,7 @@ struct CapturableApplication: Identifiable, Hashable {
     var id: String { bundleID }
 }
 
-struct CapturedTarget: Equatable {
+struct CapturedTarget: Equatable, Sendable {
     let role: String?
     let subrole: String?
     let title: String?
@@ -26,8 +26,8 @@ struct CapturedTarget: Equatable {
     }
 }
 
-struct CapturedEvent: Identifiable, Equatable {
-    enum Kind: String {
+struct CapturedEvent: Identifiable, Equatable, Sendable {
+    enum Kind: String, Sendable {
         case session = "Session"
         case application = "Application"
         case window = "Window"

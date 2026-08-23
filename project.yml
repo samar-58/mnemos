@@ -21,6 +21,8 @@ targets:
     platform: macOS
     sources:
       - path: macos/Mnemos
+    dependencies:
+      - sdk: libsqlite3.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.mnemos.app
