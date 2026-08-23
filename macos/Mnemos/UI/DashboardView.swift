@@ -197,6 +197,13 @@ private struct ActivityView: View {
                         if let title = event.windowTitle {
                             Text(title).lineLimit(2)
                         }
+                        if let documentPath = event.documentPath {
+                            Label(documentPath, systemImage: "doc")
+                                .font(.subheadline.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
                         if let detail = event.detail {
                             Text(detail)
                                 .font(.subheadline)
@@ -295,7 +302,7 @@ private struct PermissionsView: View {
                 }
                 .cardStyle()
 
-                Text("Prototype boundary: Mnemos reads focused window titles, explicitly selected text, and non-editable control descriptions. It does not read raw keystrokes, text-field values, clipboard contents, screenshots, audio, or browser page content.")
+                Text("Prototype boundary: Mnemos reads focused window titles, document paths exposed by allowed apps, explicitly selected text, and non-editable control descriptions. Common credential patterns are redacted. It does not read raw keystrokes, text-field values, clipboard contents, screenshots, audio, or browser page content.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -49,6 +49,8 @@ The first two prototype milestones are implemented:
 - Native Accessibility permission onboarding
 - Empty-by-default application allowlist
 - In-memory live inspector for window titles and explicitly selected text
+- Document/project paths when allowed applications expose them
+- Rolling duplicate suppression and common credential-pattern redaction
 - Secure-field and editable-text-value rejection
 - Browser capture disabled until domain rules are available
 - Reproducible Xcode project generation

@@ -15,6 +15,7 @@ struct CapturedEvent: Identifiable, Equatable {
     enum Kind: String {
         case application = "Application"
         case window = "Window"
+        case document = "Document"
         case selection = "Selection"
     }
 
@@ -24,10 +25,11 @@ struct CapturedEvent: Identifiable, Equatable {
     let applicationName: String
     let bundleID: String
     let windowTitle: String?
+    let documentPath: String?
     let detail: String?
 
     var fingerprint: String {
-        [bundleID, windowTitle ?? "", detail ?? ""].joined(separator: "\u{1f}")
+        [bundleID, windowTitle ?? "", documentPath ?? "", detail ?? ""].joined(separator: "\u{1f}")
     }
 }
 
@@ -42,7 +44,8 @@ final class AccessibilityCaptureService {
         "org.mozilla.firefox",
     ]
 
-    private var lastFingerprint: String?
+    private var recentFingerprints: [String: Date] = [:]
+    private let duplicateWindow: TimeInterval = 60
 
     static var isTrusted: Bool {
         AXIsProcessTrusted()
@@ -97,6 +100,7 @@ final class AccessibilityCaptureService {
 
         var kind = CapturedEvent.Kind.window
         var detail: String?
+        var documentPath: String?
 
         // Browser page content and addresses need a separate domain allowlist, so the
         // prototype intentionally records only the browser window title.
@@ -118,18 +122,32 @@ final class AccessibilityCaptureService {
             }
         }
 
+        if !Self.browserBundleIDs.contains(bundleID) {
+            let rawDocument = window.flatMap { Self.stringAttribute(kAXDocumentAttribute as CFString, from: $0) }
+                ?? Self.stringAttribute(kAXDocumentAttribute as CFString, from: applicationElement)
+            documentPath = Self.normalizedDocumentPath(rawDocument)
+            if detail == nil, documentPath != nil { kind = .document }
+        }
+
         let event = CapturedEvent(
             timestamp: .now,
             kind: windowTitle == nil && detail == nil ? .application : kind,
             applicationName: applicationName,
             bundleID: bundleID,
             windowTitle: Self.sanitize(windowTitle, maximumLength: 500),
+            documentPath: documentPath,
             detail: detail
         )
 
-        guard event.windowTitle != nil || event.detail != nil else { return nil }
-        guard event.fingerprint != lastFingerprint else { return nil }
-        lastFingerprint = event.fingerprint
+        guard event.windowTitle != nil || event.documentPath != nil || event.detail != nil else { return nil }
+
+        let now = Date.now
+        recentFingerprints = recentFingerprints.filter { now.timeIntervalSince($0.value) < duplicateWindow * 5 }
+        if let lastSeen = recentFingerprints[event.fingerprint],
+           now.timeIntervalSince(lastSeen) < duplicateWindow {
+            return nil
+        }
+        recentFingerprints[event.fingerprint] = now
         return event
     }
 
@@ -165,12 +183,40 @@ final class AccessibilityCaptureService {
 
     private static func sanitize(_ value: String?, maximumLength: Int) -> String? {
         guard let value else { return nil }
-        let normalized = value
+        var redacted = value
+        let patterns: [(String, String)] = [
+            (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"#, "$1[REDACTED]"),
+            (#"(?i)\b(api[_-]?key|secret|token|password)\s*[:=]\s*[^\s,;]+"#, "$1=[REDACTED]"),
+            (#"\bsk-[A-Za-z0-9_-]{16,}\b"#, "[REDACTED API KEY]"),
+            (#"\bgh[pousr]_[A-Za-z0-9]{16,}\b"#, "[REDACTED GITHUB TOKEN]"),
+            (#"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"#, "[REDACTED SLACK TOKEN]"),
+        ]
+        for (pattern, replacement) in patterns {
+            redacted = redacted.replacingOccurrences(
+                of: pattern,
+                with: replacement,
+                options: .regularExpression
+            )
+        }
+        if let privateKeyStart = redacted.range(of: "-----BEGIN "),
+           redacted[privateKeyStart.lowerBound...].contains("PRIVATE KEY-----") {
+            redacted = String(redacted[..<privateKeyStart.lowerBound]) + "[REDACTED PRIVATE KEY]"
+        }
+
+        let normalized = redacted
             .replacingOccurrences(of: "\u{0000}", with: "")
             .split(whereSeparator: { $0.isWhitespace })
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return nil }
         return String(normalized.prefix(maximumLength))
+    }
+
+    private static func normalizedDocumentPath(_ value: String?) -> String? {
+        guard let sanitized = sanitize(value, maximumLength: 1_000) else { return nil }
+        if let url = URL(string: sanitized), url.isFileURL {
+            return url.standardizedFileURL.path
+        }
+        return sanitized
     }
 }
