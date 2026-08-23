@@ -38,8 +38,6 @@ TypeScript MCP adapter
 
 Swift will own collection, privacy policy, persistence, and product behavior. The future TypeScript process will be a stateless stdio MCP adapter; it will never open the database directly.
 
-See [docs/architecture.md](docs/architecture.md) for the prototype boundaries and milestone sequence.
-
 ## Current status
 
 Milestone 1 is implemented:
@@ -102,10 +100,6 @@ mnemos/
 6. Codex, Claude, and Cursor dogfood integration
 
 The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings.
-
-## Contributing
-
-Contributions and design discussion are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. For security or privacy issues, follow [SECURITY.md](SECURITY.md) instead of filing a public issue.
 
 ## License
 
