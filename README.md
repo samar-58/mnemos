@@ -5,7 +5,7 @@ Mnemos is an open-source, local-first memory layer for AI agents on macOS.
 The long-term goal is simple: your computer context should belong to you, and authorized agents such as Codex, Claude, and Cursor should be able to retrieve the same useful, provenance-backed memory.
 
 > [!IMPORTANT]
-> This repository is an early prototype. Mnemos can capture a small, privacy-filtered set of Accessibility context from explicitly allowed applications. Events currently remain in memory and disappear when the app quits.
+> This repository is an early prototype. Mnemos captures a privacy-filtered semantic event stream from explicitly allowed applications using macOS Accessibility APIs. Events currently remain in memory and disappear when the app quits.
 
 ## Product principles
 
@@ -14,7 +14,7 @@ The long-term goal is simple: your computer context should belong to you, and au
 - **Private by default:** capture starts with an empty application and domain allowlist.
 - **Evidence backed:** agents receive observations and episode IDs, not unsupported claims.
 - **Untrusted input:** captured content is always treated as evidence, never as instructions.
-- **Minimal capture:** no raw keystrokes, screenshots, OCR, audio, or clipboard collection.
+- **Semantic capture:** meaningful app, window, input-target, and Accessibility-tree changes instead of screenshots, OCR, audio, or clipboard collection.
 
 ## Architecture
 
@@ -48,11 +48,13 @@ The first two prototype milestones are implemented:
 - Overview, activity, permissions, agents, and settings sections
 - Native Accessibility permission onboarding
 - Empty-by-default application allowlist
-- In-memory live inspector for window titles and explicitly selected text
-- Document/project paths when allowed applications expose them
+- Event-driven AX notifications for application, window, focus, selection, and value changes
+- Semantic buffered keyboard text/shortcuts and mouse click/drag targets
+- Bounded initial Accessibility-tree snapshots followed by meaningful diffs
+- Document/project paths and terminal output changes when allowed applications expose them
+- Browser URL/content capture behind independent domain allowlisting
+- Private-window, secure-input, password-field, disallowed-app, and disallowed-domain rejection
 - Rolling duplicate suppression and common credential-pattern redaction
-- Secure-field and editable-text-value rejection
-- Browser capture disabled until domain rules are available
 - Reproducible Xcode project generation
 
 No activity is written to disk yet.
@@ -100,13 +102,13 @@ mnemos/
 ## Roadmap
 
 1. Native macOS shell and menu-bar experience — complete
-2. Accessibility onboarding and allowlist-only capture — complete for the in-memory prototype
-3. Privacy filtering, encrypted storage, and deterministic episodes
+2. Accessibility onboarding and semantic event-stream capture — complete for the in-memory prototype
+3. Encrypted storage and deterministic episodes
 4. Authenticated loopback API
 5. TypeScript stdio MCP adapter
 6. Codex, Claude, and Cursor dogfood integration
 
-The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings.
+The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed.
 
 ## License
 

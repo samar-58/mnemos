@@ -94,8 +94,8 @@ private struct OverviewView: View {
                     MilestoneRow(
                         symbol: model.accessibilityTrusted ? "checkmark.circle.fill" : "circle",
                         color: model.accessibilityTrusted ? .green : .secondary,
-                        title: "Accessibility capture",
-                        detail: "Explicit application allowlist and secure-field rejection"
+                        title: "Semantic event stream",
+                        detail: "AX notifications, input targets, tree diffs, and secure-field rejection"
                     )
                     Divider().padding(.leading, 48)
                     MilestoneRow(symbol: "circle", color: .secondary, title: "Local memory", detail: "Encrypted SQLite, episodes, and retrieval")
@@ -204,11 +204,35 @@ private struct ActivityView: View {
                                 .lineLimit(2)
                                 .textSelection(.enabled)
                         }
+                        if let url = event.url {
+                            Label(url, systemImage: "globe")
+                                .font(.subheadline.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                        if let target = event.target?.summary {
+                            Label(target, systemImage: "scope")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
                         if let detail = event.detail {
                             Text(detail)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
-                                .lineLimit(3)
+                                .lineLimit(6)
+                                .textSelection(.enabled)
+                        }
+                        if let axText = event.axText {
+                            Text(axText)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(8)
+                                .textSelection(.enabled)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 7))
                         }
                         Text(event.bundleID)
                             .font(.caption2.monospaced())
@@ -231,6 +255,7 @@ private struct ActivityView: View {
 
 private struct PermissionsView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var domainDraft = ""
 
     var body: some View {
         ScrollView {
@@ -263,7 +288,7 @@ private struct PermissionsView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     SectionHeading(
                         title: "Allowed applications",
-                        subtitle: "The default is none. Browsers stay disabled until domain-level controls are available."
+                        subtitle: "The default is none. Browser events additionally require an allowed domain."
                     )
                     Divider()
 
@@ -279,7 +304,7 @@ private struct PermissionsView: View {
                                     .foregroundStyle(.secondary)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(application.name)
-                                    Text(application.isBrowser ? "Browser domain rules required" : application.bundleID)
+                                    Text(application.isBrowser ? "Only allowed domains; private windows are always excluded" : application.bundleID)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
@@ -292,7 +317,6 @@ private struct PermissionsView: View {
                                     )
                                 )
                                 .labelsHidden()
-                                .disabled(application.isBrowser)
                             }
                             .padding(.horizontal, 18)
                             .padding(.vertical, 11)
@@ -302,7 +326,41 @@ private struct PermissionsView: View {
                 }
                 .cardStyle()
 
-                Text("Prototype boundary: Mnemos reads focused window titles, document paths exposed by allowed apps, explicitly selected text, and non-editable control descriptions. Common credential patterns are redacted. It does not read raw keystrokes, text-field values, clipboard contents, screenshots, audio, or browser page content.")
+                VStack(alignment: .leading, spacing: 0) {
+                    SectionHeading(
+                        title: "Allowed website domains",
+                        subtitle: "Browser activity is suppressed unless its current URL matches one of these domains or a subdomain."
+                    )
+                    Divider()
+                    HStack {
+                        TextField("github.com", text: $domainDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .onSubmit { addDomain() }
+                        Button("Add domain") { addDomain() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(domainDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(18)
+
+                    if !model.allowedDomains.isEmpty {
+                        Divider()
+                        ForEach(model.allowedDomains.sorted(), id: \.self) { domain in
+                            HStack {
+                                Label(domain, systemImage: "globe")
+                                    .textSelection(.enabled)
+                                Spacer()
+                                Button("Remove", role: .destructive) {
+                                    model.removeAllowedDomain(domain)
+                                }
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                        }
+                    }
+                }
+                .cardStyle()
+
+                Text("Prototype boundary: Mnemos records semantic keyboard text and shortcuts, mouse targets, focused controls, bounded Accessibility-tree snapshots/diffs, selected text, window/document context, terminal changes, and allowed browser URLs/content. Secure input, password controls, private browser windows, disallowed apps/domains, clipboard contents, screenshots, audio, and OCR are excluded. Common credential patterns are redacted. Everything remains in memory until Mnemos quits.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -312,6 +370,12 @@ private struct PermissionsView: View {
         }
         .navigationTitle("Permissions")
         .onAppear { model.refreshAvailableApplications() }
+    }
+
+    private func addDomain() {
+        if model.addAllowedDomain(domainDraft) {
+            domainDraft = ""
+        }
     }
 }
 
