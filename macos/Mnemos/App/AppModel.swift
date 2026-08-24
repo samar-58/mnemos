@@ -47,6 +47,34 @@ final class AppModel: ObservableObject {
     @Published private(set) var selectedEpisodeEvidence: [EpisodeEvidence] = []
     @Published private(set) var memoryError: String?
     @Published private(set) var isMemorySearching = false
+    @Published private(set) var contextHealth = ContextStoreHealth(
+        state: .indexing,
+        observationCount: 0,
+        sessionCount: 0,
+        taskCount: 0,
+        spanCount: 0,
+        evidenceCount: 0,
+        semanticVectorCount: 0,
+        detail: "Starting V2 context index…"
+    )
+    @Published private(set) var contextSessions: [WorkSession] = []
+    @Published private(set) var contextTasks: [TaskMemory] = []
+    @Published private(set) var contextWorkstreams: [Workstream] = []
+    @Published private(set) var contextSearchResults: [ContextSearchResult] = []
+    @Published private(set) var selectedTask: TaskMemory?
+    @Published private(set) var selectedTaskSpans: [ActivitySpan] = []
+    @Published private(set) var selectedTaskEvidence: [EvidenceItem] = []
+    @Published private(set) var contextStorage = ContextStorageUsage(
+        databaseBytes: 0,
+        rawRetentionDays: 30,
+        redactionPolicyVersion: CapturePrivacy.redactionPolicyVersion,
+        semanticSearchEnabled: true
+    )
+    @Published private(set) var contextError: String?
+    @Published private(set) var isContextSearching = false
+    @Published private(set) var dogfoodRiskAccepted: Bool
+    @Published private(set) var customRedactionLiterals: [String]
+    @Published private(set) var customRedactionRegexes: [String]
     @Published private(set) var agentAccessEnabled: Bool
     @Published private(set) var agentAPIStatus: AgentAPIStatus = .stopped
     @Published private(set) var agentConfigurationPath = ""
@@ -54,6 +82,7 @@ final class AppModel: ObservableObject {
     let launchedAt = Date.now
     private let captureService = AccessibilityCaptureService()
     private let memoryStore: SQLiteMemoryStore
+    private let contextStore: ContextEngineStore
     private let agentAPI: LocalMemoryAPI
     private var monitorTask: Task<Void, Never>?
     private var persistenceTask: Task<Void, Never>?
@@ -64,22 +93,36 @@ final class AppModel: ObservableObject {
     private static let allowedApplicationsKey = "allowedApplicationBundleIDs"
     private static let allowedDomainsKey = "allowedURLDomains"
     private static let agentAccessEnabledKey = "agentAccessEnabled"
+    private static let dogfoodRiskAcceptedKey = "dogfoodUnencryptedRiskAccepted"
 
     init() {
         let memoryStore = SQLiteMemoryStore()
+        let contextStore = ContextEngineStore()
         self.memoryStore = memoryStore
-        agentAPI = LocalMemoryAPI(memoryStore: memoryStore)
+        self.contextStore = contextStore
+        agentAPI = LocalMemoryAPI(memoryStore: memoryStore, contextStore: contextStore)
         allowedBundleIDs = Set(UserDefaults.standard.stringArray(forKey: Self.allowedApplicationsKey) ?? [])
         allowedDomains = Set(
             (UserDefaults.standard.stringArray(forKey: Self.allowedDomainsKey) ?? [])
                 .compactMap(CapturePrivacy.normalizedDomain)
         )
-        agentAccessEnabled = UserDefaults.standard.bool(forKey: Self.agentAccessEnabledKey)
+        let environment = ProcessInfo.processInfo.environment
+        let isRunningUnitTests = NSClassFromString("XCTestCase") != nil
+            || environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+            || environment["XCInjectBundleInto"] != nil
+        agentAccessEnabled = !isRunningUnitTests
+            && UserDefaults.standard.bool(forKey: Self.agentAccessEnabledKey)
+        dogfoodRiskAccepted = UserDefaults.standard.bool(forKey: Self.dogfoodRiskAcceptedKey)
+        customRedactionLiterals = UserDefaults.standard.stringArray(forKey: CapturePrivacy.customLiteralDefaultsKey) ?? []
+        customRedactionRegexes = UserDefaults.standard.stringArray(forKey: CapturePrivacy.customRegexDefaultsKey) ?? []
         refreshAvailableApplications()
         if !accessibilityTrusted { status = .permissionRequired }
         refreshMemory()
+        refreshContextMemory()
         Task { [weak self] in
             guard let self else { return }
+            guard !isRunningUnitTests else { return }
             if agentAccessEnabled {
                 await agentAPI.start()
             } else {
@@ -150,6 +193,13 @@ final class AppModel: ObservableObject {
     func setApplication(_ application: CapturableApplication, allowed: Bool) {
         guard !application.isBrowser || !allowed || !allowedDomains.isEmpty else {
             captureMessage = "Add at least one allowed website domain before enabling a browser."
+            return
+        }
+        if allowed,
+           (CapturePrivacy.isTerminal(application.bundleID) || Self.isCommunicationApplication(application)),
+           !dogfoodRiskAccepted {
+            selectedSection = .settings
+            captureMessage = "Acknowledge the dogfood encryption risk in Settings before enabling terminal or chat applications."
             return
         }
         if allowed {
@@ -255,6 +305,164 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func refreshContextMemory() {
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await memoryStore.health()
+            do {
+                try await contextStore.prepare()
+                async let sessions = contextStore.recentSessions()
+                async let tasks = contextStore.recentTasks()
+                async let workstreams = contextStore.allWorkstreams()
+                contextSessions = try await sessions
+                contextTasks = try await tasks
+                contextWorkstreams = try await workstreams
+                contextHealth = await contextStore.health()
+                contextStorage = await contextStore.storageUsage()
+                contextError = nil
+                if let selectedTask,
+                   let refreshed = contextTasks.first(where: { $0.id == selectedTask.id }) {
+                    self.selectedTask = refreshed
+                }
+            } catch {
+                contextHealth = await contextStore.health()
+                contextError = error.localizedDescription
+            }
+        }
+    }
+
+    func searchContext(_ text: String, from: Date? = nil, to: Date? = nil, application: String? = nil, workstream: String? = nil, pinnedOnly: Bool = false) {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchGeneration += 1
+        let generation = searchGeneration
+        if normalized.isEmpty, from == nil, to == nil, application == nil, workstream == nil, !pinnedOnly {
+            contextSearchResults = []
+            isContextSearching = false
+            return
+        }
+        isContextSearching = true
+        let query = MemoryQuery(
+            text: normalized.isEmpty ? nil : normalized,
+            from: from,
+            to: to,
+            application: application,
+            workstream: workstream,
+            pinnedOnly: pinnedOnly,
+            limit: 30
+        )
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let results = try await contextStore.search(query)
+                guard generation == searchGeneration else { return }
+                contextSearchResults = results
+                contextError = nil
+                isContextSearching = false
+            } catch {
+                guard generation == searchGeneration else { return }
+                contextSearchResults = []
+                contextError = error.localizedDescription
+                isContextSearching = false
+            }
+        }
+    }
+
+    func selectTask(_ task: TaskMemory?) {
+        selectedTask = task
+        selectedTaskSpans = []
+        selectedTaskEvidence = []
+        guard let task else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                async let spans = contextStore.spans(for: task.id)
+                async let evidence = contextStore.evidence(for: task.id)
+                guard selectedTask?.id == task.id else { return }
+                selectedTaskSpans = try await spans
+                selectedTaskEvidence = try await evidence
+                contextError = nil
+            } catch {
+                contextError = error.localizedDescription
+            }
+        }
+    }
+
+    func renameSelectedTask(_ title: String) {
+        guard let id = selectedTask?.id else { return }
+        performContextMutation { try await self.contextStore.renameTask(id: id, title: title) }
+    }
+
+    func toggleSelectedTaskPin() {
+        guard let task = selectedTask else { return }
+        performContextMutation { try await self.contextStore.setPinned(!task.isPinned, taskID: task.id) }
+    }
+
+    func deleteSelectedTask() {
+        guard let id = selectedTask?.id else { return }
+        selectedTask = nil
+        selectedTaskSpans = []
+        selectedTaskEvidence = []
+        performContextMutation { try await self.contextStore.deleteTask(id: id) }
+    }
+
+    func mergeTasks(_ ids: [String]) {
+        performContextMutation { try await self.contextStore.mergeTasks(ids) }
+    }
+
+    func splitSpans(_ ids: [String]) {
+        performContextMutation { _ = try await self.contextStore.moveSpans(ids, to: nil) }
+    }
+
+    func moveSpans(_ ids: [String], to taskID: String) {
+        performContextMutation { _ = try await self.contextStore.moveSpans(ids, to: taskID) }
+    }
+
+    func assignSelectedTask(to workstreamID: String?) {
+        guard let taskID = selectedTask?.id else { return }
+        performContextMutation { try await self.contextStore.assignTask(taskID, toWorkstream: workstreamID) }
+    }
+
+    func acceptDogfoodRisk() {
+        dogfoodRiskAccepted = true
+        UserDefaults.standard.set(true, forKey: Self.dogfoodRiskAcceptedKey)
+    }
+
+    func setSemanticSearchEnabled(_ enabled: Bool) {
+        performContextMutation { try await self.contextStore.setSemanticSearchEnabled(enabled) }
+    }
+
+    func setRawRetentionDays(_ days: Int?) {
+        performContextMutation { try await self.contextStore.setRawRetentionDays(days) }
+    }
+
+    func rebuildSemanticIndex() {
+        performContextMutation { try await self.contextStore.rebuildSemanticIndex() }
+    }
+
+    @discardableResult
+    func addCustomRedactionRule(_ value: String, regex: Bool) -> Bool {
+        let rule = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rule.isEmpty else { return false }
+        if regex, let error = CapturePrivacy.validateCustomRegex(rule) {
+            contextError = error
+            return false
+        }
+        let total = customRedactionLiterals.count + customRedactionRegexes.count
+        guard total < CapturePrivacy.maximumCustomRules else {
+            contextError = "Mnemos supports at most \(CapturePrivacy.maximumCustomRules) custom redaction rules."
+            return false
+        }
+        if regex { customRedactionRegexes.append(rule) } else { customRedactionLiterals.append(rule) }
+        saveCustomRedactionRules()
+        return true
+    }
+
+    func removeCustomRedactionRule(_ value: String, regex: Bool) {
+        if regex { customRedactionRegexes.removeAll { $0 == value } }
+        else { customRedactionLiterals.removeAll { $0 == value } }
+        saveCustomRedactionRules()
+    }
+
     func setAgentAccessEnabled(_ enabled: Bool) {
         guard enabled != agentAccessEnabled else { return }
         agentAccessEnabled = enabled
@@ -321,6 +529,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             do {
                 try await memoryStore.record(event)
+                try await contextStore.record(event)
                 persistedSinceRefresh += 1
                 if persistedSinceRefresh >= 5 || selectedSection == .memory {
                     persistedSinceRefresh = 0
@@ -329,6 +538,9 @@ final class AppModel: ObservableObject {
                     memoryHealth = health
                     recentEpisodes = episodes
                     memoryError = nil
+                    contextHealth = await contextStore.health()
+                    contextSessions = try await contextStore.recentSessions()
+                    contextTasks = try await contextStore.recentTasks()
                 }
             } catch {
                 memoryError = error.localizedDescription
@@ -343,6 +555,40 @@ final class AppModel: ObservableObject {
 
     private func saveAllowedDomains() {
         UserDefaults.standard.set(Array(allowedDomains).sorted(), forKey: Self.allowedDomainsKey)
+    }
+
+    private func saveCustomRedactionRules() {
+        UserDefaults.standard.set(customRedactionLiterals, forKey: CapturePrivacy.customLiteralDefaultsKey)
+        UserDefaults.standard.set(customRedactionRegexes, forKey: CapturePrivacy.customRegexDefaultsKey)
+        CapturePrivacy.advanceRedactionPolicyVersion()
+        contextStorage = ContextStorageUsage(
+            databaseBytes: contextStorage.databaseBytes,
+            rawRetentionDays: contextStorage.rawRetentionDays,
+            redactionPolicyVersion: CapturePrivacy.redactionPolicyVersion,
+            semanticSearchEnabled: contextStorage.semanticSearchEnabled
+        )
+        performContextMutation { try await self.contextStore.redactionPolicyDidChange() }
+    }
+
+    private func performContextMutation(_ operation: @escaping @MainActor () async throws -> Void) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await operation()
+                refreshContextMemory()
+                if let selectedTask,
+                   let refreshed = try await contextStore.task(id: selectedTask.id) {
+                    selectTask(refreshed)
+                }
+            } catch {
+                contextError = error.localizedDescription
+            }
+        }
+    }
+
+    private static func isCommunicationApplication(_ application: CapturableApplication) -> Bool {
+        let value = "\(application.bundleID) \(application.name)".lowercased()
+        return ["whatsapp", "slack", "discord", "messages", "telegram", "signal"].contains(where: value.contains)
     }
 
     func showDashboard() {

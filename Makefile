@@ -3,13 +3,16 @@ SCHEME := Mnemos
 DERIVED_DATA := .deriveddata
 APP := $(DERIVED_DATA)/Build/Products/Debug/Mnemos.app
 
-.PHONY: project build run open clean mcp-install mcp-build mcp-smoke
+.PHONY: project build test run open clean mcp-install mcp-build mcp-smoke
 
 project:
 	xcodegen generate --spec project.yml --project macos --project-root .
 
 build: project
 	xcodebuild -project "$(PROJECT)" -scheme "$(SCHEME)" -configuration Debug -derivedDataPath "$(DERIVED_DATA)" CODE_SIGNING_ALLOWED=NO build
+
+test: project
+	xcodebuild -project "$(PROJECT)" -scheme "$(SCHEME)" -configuration Debug -derivedDataPath "$(DERIVED_DATA)" CODE_SIGNING_ALLOWED=NO test
 
 run: build
 	open "$(APP)"

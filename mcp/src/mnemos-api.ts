@@ -5,7 +5,7 @@ import { isAbsolute, resolve } from "node:path";
 import * as z from "zod/v4";
 
 const configurationSchema = z.object({
-  apiVersion: z.literal(1),
+  apiVersion: z.literal(2),
   baseURL: z.url(),
   bearerToken: z.string().min(40).max(200),
   processID: z.number().int().positive(),
@@ -34,7 +34,7 @@ export class MnemosAPIClient {
   async get<Schema extends z.ZodType>(
     path: string,
     schema: Schema,
-    query: Record<string, string | number | undefined> = {},
+    query: Record<string, string | number | boolean | undefined> = {},
   ): Promise<z.infer<Schema>> {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const configuration = await this.#loadConfiguration();

@@ -43,7 +43,7 @@ struct CapturedEvent: Identifiable, Equatable, Sendable {
         case diagnostic = "Diagnostic"
     }
 
-    let id = UUID()
+    let id: UUID
     let timestamp: Date
     let kind: Kind
     let applicationName: String
@@ -56,6 +56,7 @@ struct CapturedEvent: Identifiable, Equatable, Sendable {
     let axText: String?
 
     init(
+        id: UUID = UUID(),
         timestamp: Date = .now,
         kind: Kind,
         applicationName: String,
@@ -67,6 +68,7 @@ struct CapturedEvent: Identifiable, Equatable, Sendable {
         detail: String? = nil,
         axText: String? = nil
     ) {
+        self.id = id
         self.timestamp = timestamp
         self.kind = kind
         self.applicationName = applicationName

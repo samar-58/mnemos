@@ -113,6 +113,7 @@ final class AccessibilityCaptureService {
     private var eventSink: ((CapturedEvent) -> Void)?
 
     private var workspaceActivationObserver: NSObjectProtocol?
+    private var lifecycleObservers: [NSObjectProtocol] = []
     private var axObserver: AXObserver?
     private var axRegistrations: [(element: AXUIElement, notification: String)] = []
     private var eventTap: CFMachPort?
@@ -187,6 +188,7 @@ final class AccessibilityCaptureService {
                 self?.bindToFrontmostApplication(reason: "Frontmost application changed")
             }
         }
+        registerLifecycleObservers()
 
         let inputMonitoringAvailable = installEventTap()
         bindToFrontmostApplication(reason: "Capture session started")
@@ -213,6 +215,10 @@ final class AccessibilityCaptureService {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
         workspaceActivationObserver = nil
+        for observer in lifecycleObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        lifecycleObservers.removeAll()
         removeAXObserver()
         removeEventTap()
         textFlushTask?.cancel()
@@ -561,6 +567,38 @@ final class AccessibilityCaptureService {
 
     private func currentContext() -> AXCaptureContext? {
         AXContextReader.frontmostContext(allowedBundleIDs: allowedBundleIDs, allowedDomains: allowedDomains)
+    }
+
+    private func registerLifecycleObservers() {
+        let boundaries: [(Notification.Name, String)] = [
+            (NSWorkspace.willSleepNotification, "System sleep"),
+            (NSWorkspace.screensDidSleepNotification, "Screen sleep"),
+            (NSWorkspace.sessionDidResignActiveNotification, "Screen locked"),
+        ]
+        for (name, detail) in boundaries {
+            let observer = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: name,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.emitSystemBoundary(detail) }
+            }
+            lifecycleObservers.append(observer)
+        }
+    }
+
+    private func emitSystemBoundary(_ detail: String) {
+        guard isRunning else { return }
+        flushTextBuffer()
+        emit(
+            CapturedEvent(
+                kind: .session,
+                applicationName: "macOS",
+                bundleID: "com.apple.system",
+                detail: detail
+            ),
+            dedupeWindow: 0
+        )
     }
 
     private func makeEvent(

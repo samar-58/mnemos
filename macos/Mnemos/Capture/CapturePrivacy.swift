@@ -2,6 +2,22 @@ import ApplicationServices
 import Foundation
 
 enum CapturePrivacy {
+    private static let minimumRedactionPolicyVersion = 2
+    private static let redactionPolicyVersionDefaultsKey = "redactionPolicyVersion"
+    static var redactionPolicyVersion: Int {
+        max(minimumRedactionPolicyVersion, UserDefaults.standard.integer(forKey: redactionPolicyVersionDefaultsKey))
+    }
+    static let customLiteralDefaultsKey = "redactionCustomLiterals"
+    static let customRegexDefaultsKey = "redactionCustomRegexes"
+    static let maximumCustomRules = 20
+
+    @discardableResult
+    static func advanceRedactionPolicyVersion() -> Int {
+        let next = redactionPolicyVersion + 1
+        UserDefaults.standard.set(next, forKey: redactionPolicyVersionDefaultsKey)
+        return next
+    }
+
     static let browserBundleIDs: Set<String> = [
         "com.apple.Safari",
         "com.apple.SafariTechnologyPreview",
@@ -66,6 +82,8 @@ enum CapturePrivacy {
             (#"\bgh[pousr]_[A-Za-z0-9]{16,}\b"#, "[REDACTED GITHUB TOKEN]"),
             (#"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"#, "[REDACTED SLACK TOKEN]"),
             (#"\bAKIA[A-Z0-9]{16}\b"#, "[REDACTED AWS KEY]"),
+            (#"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"#, "[REDACTED JWT]"),
+            (#"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@:]+:[^\s/@]+@"#, "$1[REDACTED]@"),
         ]
         for (pattern, replacement) in patterns {
             redacted = redacted.replacingOccurrences(
@@ -79,7 +97,27 @@ enum CapturePrivacy {
             redacted = String(redacted[..<privateKeyStart.lowerBound]) + "[REDACTED PRIVATE KEY]"
         }
 
-        redacted = redacted.replacingOccurrences(of: "\u{0000}", with: "")
+        let defaults = UserDefaults.standard
+        for literal in defaults.stringArray(forKey: customLiteralDefaultsKey)?.prefix(maximumCustomRules) ?? [] {
+            guard !literal.isEmpty else { continue }
+            redacted = redacted.replacingOccurrences(
+                of: literal,
+                with: "[REDACTED CUSTOM]",
+                options: [.caseInsensitive, .literal]
+            )
+        }
+        for pattern in defaults.stringArray(forKey: customRegexDefaultsKey)?.prefix(maximumCustomRules) ?? [] {
+            guard validateCustomRegex(pattern) == nil else { continue }
+            redacted = redacted.replacingOccurrences(
+                of: pattern,
+                with: "[REDACTED CUSTOM]",
+                options: .regularExpression
+            )
+        }
+
+        redacted = String(redacted.unicodeScalars.filter { scalar in
+            scalar == "\n" || scalar == "\t" || !CharacterSet.controlCharacters.contains(scalar)
+        })
         let normalized: String
         if preserveLines {
             normalized = redacted
@@ -95,6 +133,84 @@ enum CapturePrivacy {
         }
         guard !normalized.isEmpty else { return nil }
         return String(normalized.prefix(maximumLength))
+    }
+
+    static func validateCustomRegex(_ pattern: String) -> String? {
+        guard !pattern.isEmpty else { return "The pattern cannot be empty." }
+        guard pattern.count <= 256 else { return "Patterns are limited to 256 characters." }
+        let unsupported = ["(?<=", "(?<!", "*", "+"]
+        if unsupported.contains(where: pattern.contains) {
+            return "Use bounded quantifiers such as {1,64}; look-behind and unbounded quantifiers are not allowed."
+        }
+        if pattern.range(of: #"\{[0-9]+,\}"#, options: .regularExpression) != nil {
+            return "Unbounded quantifiers are not allowed; provide an upper bound such as {1,64}."
+        }
+        if pattern.range(of: #"\\[1-9]"#, options: .regularExpression) != nil {
+            return "Backreferences are not allowed."
+        }
+        do {
+            _ = try NSRegularExpression(pattern: pattern)
+            return nil
+        } catch {
+            return "The regular expression is invalid."
+        }
+    }
+
+    static func redactionCategoryCounts(in values: [String?]) -> [String: Int] {
+        let markers = [
+            "api_key": "[REDACTED API KEY]",
+            "github_token": "[REDACTED GITHUB TOKEN]",
+            "slack_token": "[REDACTED SLACK TOKEN]",
+            "aws_key": "[REDACTED AWS KEY]",
+            "jwt": "[REDACTED JWT]",
+            "private_key": "[REDACTED PRIVATE KEY]",
+            "custom": "[REDACTED CUSTOM]",
+            "credential": "[REDACTED]",
+        ]
+        var counts: [String: Int] = [:]
+        for value in values.compactMap({ $0 }) {
+            for (category, marker) in markers {
+                var search = value.startIndex..<value.endIndex
+                while let range = value.range(of: marker, range: search) {
+                    counts[category, default: 0] += 1
+                    search = range.upperBound..<value.endIndex
+                }
+            }
+        }
+        return counts
+    }
+
+    static func sanitizedEvent(_ event: CapturedEvent) -> CapturedEvent? {
+        if isPrivateBrowserWindow(event.windowTitle) { return nil }
+        if let target = event.target,
+           isSecureElement(
+               role: target.role,
+               subrole: target.subrole,
+               title: target.title,
+               description: nil,
+               identifier: target.identifier
+           ) { return nil }
+        let target = event.target.map {
+            CapturedTarget(
+                role: sanitize($0.role, maximumLength: 100),
+                subrole: sanitize($0.subrole, maximumLength: 100),
+                title: sanitize($0.title, maximumLength: 500),
+                identifier: sanitize($0.identifier, maximumLength: 300)
+            )
+        }
+        return CapturedEvent(
+            id: event.id,
+            timestamp: event.timestamp,
+            kind: event.kind,
+            applicationName: sanitize(event.applicationName, maximumLength: 200) ?? "Unknown",
+            bundleID: sanitize(event.bundleID, maximumLength: 300) ?? "unknown",
+            windowTitle: sanitize(event.windowTitle, maximumLength: 1_000),
+            documentPath: normalizedDocumentPath(event.documentPath),
+            url: sanitizedBrowserURL(event.url)?.absoluteString,
+            target: target,
+            detail: sanitize(event.detail, maximumLength: 2_000, preserveLines: true),
+            axText: sanitize(event.axText, maximumLength: 12_000, preserveLines: true)
+        )
     }
 
     static func normalizedDocumentPath(_ value: String?) -> String? {

@@ -23,6 +23,8 @@ targets:
       - path: macos/Mnemos
     dependencies:
       - sdk: libsqlite3.tbd
+      - sdk: Accelerate.framework
+      - sdk: NaturalLanguage.framework
       - sdk: Network.framework
       - sdk: Security.framework
     settings:
@@ -36,5 +38,17 @@ targets:
         INFOPLIST_KEY_NSPrincipalClass: NSApplication
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
     scheme:
-      testTargets: []
-      gatherCoverageData: false
+      testTargets:
+        - MnemosTests
+      gatherCoverageData: true
+  MnemosTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: macos/MnemosTests
+    dependencies:
+      - target: Mnemos
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.mnemos.tests
+        GENERATE_INFOPLIST_FILE: YES

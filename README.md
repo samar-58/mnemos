@@ -5,7 +5,7 @@ Mnemos is an open-source, local-first memory layer for AI agents on macOS.
 The long-term goal is simple: your computer context should belong to you, and authorized agents such as Codex, Claude, and Cursor should be able to retrieve the same useful, provenance-backed memory.
 
 > [!IMPORTANT]
-> This repository is an early prototype. Mnemos captures a privacy-filtered semantic event stream from explicitly allowed applications using macOS Accessibility APIs, persists it locally, groups it into deterministic episodes, and provides evidence-backed full-text retrieval.
+> This repository is a dogfood prototype. Mnemos captures a privacy-filtered semantic event stream from explicitly allowed applications, derives sessions/tasks/spans/workstreams, and provides evidence-backed hybrid retrieval to local agents.
 
 ## Product principles
 
@@ -24,7 +24,8 @@ Swift macOS app
 ├── Accessibility collector
 ├── Privacy filtering
 ├── Private local SQLite / FTS5 storage
-├── Episode and memory engine
+├── Workstream → session → task → span context engine
+├── NLEmbedding + Accelerate exact semantic search
 └── Authenticated loopback API
           ▲
           │ HTTP on 127.0.0.1
@@ -40,7 +41,7 @@ Swift owns collection, privacy policy, persistence, and product behavior. The Ty
 
 ## Current status
 
-The first five prototype milestones are implemented:
+The V2 context-engine prototype is implemented:
 
 - Swift 6 and SwiftUI macOS application
 - Menu-bar app experience
@@ -56,14 +57,20 @@ The first five prototype milestones are implemented:
 - Private-window, secure-input, password-field, disallowed-app, and disallowed-domain rejection
 - Rolling duplicate suppression and common credential-pattern redaction
 - Swift-owned SQLite persistence with schema migrations and private filesystem permissions
-- Deterministic activity episodes with application, project, artifact, and last-state context
-- Ranked FTS5 search across both episode summaries and supporting observations
-- In-app Memory inspector with provenance drill-down
-- 30-day raw-observation retention; derived episodes are kept separately
+- Explicit workstreams and anchors across sessions, with session-owned task episodes and application spans
+- Bounded task-candidate segmentation, interruption resumption, and background semantic reconciliation
+- Versioned ingress and compact-evidence redaction, restricted custom rules, and category-only metrics
+- Diverse compact evidence capped at 24 items per task
+- Configurable 7/30/90-day or forever raw-observation retention; compact task memory remains separately
+- Hybrid FTS5 plus Apple sentence-embedding retrieval with filtered candidates, exact Accelerate cosine scoring, and reciprocal-rank fusion
+- Dynamic embedding dimensions stored with provider, language, revision, and content hash
+- In-app hierarchical Memory inspector with filters, grouping explanations, provenance, rename/pin/workstream/merge/split/move/delete corrections
 - Off-by-default, read-only agent access over an authenticated IPv4 loopback API
 - Per-launch 256-bit bearer tokens handed to adapters through a user-only configuration file
-- TypeScript stdio MCP adapter with `search_memory`, `recent_activity`, `get_episode`, and `get_evidence`
+- TypeScript stdio MCP adapter with `search_memory`, `recent_activity`, `get_episode`, `get_evidence`, `recall_context`, and `get_timeline`
 - Structured MCP results, read-only annotations, provenance IDs, and explicit prompt-injection boundaries
+- Additive, resumable V1-to-V2 observation replay with assignment, foreign-key, FTS, and vector validation
+- Swift privacy/vector tests and live Swift-API/MCP integration smoke tests
 - Reproducible Xcode project generation
 
 The prototype database lives in `~/Library/Application Support/Mnemos/mnemos.sqlite`. It is restricted to the current macOS user and benefits from macOS/FileVault protection when FileVault is enabled. Application-level database encryption is not implemented yet and is required before a public alpha.
@@ -90,6 +97,7 @@ Clone the repository, then run:
 ```sh
 make project
 make build
+make test
 make run
 ```
 
@@ -132,7 +140,7 @@ mnemos/
 └── Makefile                 # Local development commands
 ```
 
-## Roadmap
+## Milestones
 
 1. Native macOS shell and menu-bar experience — complete
 2. Accessibility onboarding and semantic event-stream capture — complete for the in-memory prototype
@@ -140,8 +148,9 @@ mnemos/
 4. Authenticated loopback API — complete for the prototype
 5. TypeScript stdio MCP adapter — complete for the prototype
 6. Codex, Claude, and Cursor dogfood integration — configured locally
+7. V2 hierarchical context engine, hybrid retrieval, corrections, and six-tool MCP — complete for dogfood
 
-The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, internal LLM calls, and embeddings. Keyboard text is buffered into semantic events rather than persisted as individual raw key-down records, and secure input is always suppressed. Application-level database encryption, per-agent authorization, and configurable retention are still pending.
+The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, and internal LLM calls. Keyboard text is buffered into semantic chunks rather than persisted as individual key-down records, and secure input is always suppressed. Application-level database encryption and per-agent authorization remain blockers for public alpha.
 
 ## License
 

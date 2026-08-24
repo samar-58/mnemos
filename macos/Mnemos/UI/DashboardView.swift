@@ -33,11 +33,118 @@ struct DashboardView: View {
         case .agents:
             AgentAccessView()
         case .settings:
-            PlaceholderSection(
-                title: "Settings",
-                subtitle: "Retention, privacy, and launch-at-login controls will live here.",
-                symbol: "gearshape"
-            )
+            SettingsView()
+        }
+    }
+}
+
+private struct SettingsView: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var retention = 30
+    @State private var ruleDraft = ""
+    @State private var ruleIsRegex = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Label("Dogfood security boundary", systemImage: "exclamationmark.shield.fill")
+                        .font(.headline).foregroundStyle(.orange)
+                    Text("Mnemos uses mode-600 local files and benefits from FileVault, but the SQLite database is not application-encrypted. It does not protect against same-account malware or an unlocked Mac. This build is not a public alpha.")
+                        .foregroundStyle(.secondary)
+                    if model.dogfoodRiskAccepted {
+                        Label("Risk acknowledged for this Mac", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Button("I understand — enable sensitive-app dogfood") { model.acceptDogfoodRisk() }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+                .cardStyle()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    SectionHeading(title: "Storage and retrieval", subtitle: "Raw activity expires independently from durable task memory and compact evidence.")
+                    Divider()
+                    HStack {
+                        Text("Raw observation retention")
+                        Spacer()
+                        Picker("Retention", selection: $retention) {
+                            Text("7 days").tag(7)
+                            Text("30 days").tag(30)
+                            Text("90 days").tag(90)
+                            Text("Forever").tag(-1)
+                        }
+                        .labelsHidden().frame(width: 130)
+                        .onChange(of: retention) { _, value in model.setRawRetentionDays(value == -1 ? nil : value) }
+                    }
+                    Toggle(
+                        "On-device semantic search",
+                        isOn: Binding(
+                            get: { model.contextStorage.semanticSearchEnabled },
+                            set: { model.setSemanticSearchEnabled($0) }
+                        )
+                    )
+                    HStack {
+                        Label(ByteCountFormatter.string(fromByteCount: model.contextStorage.databaseBytes, countStyle: .file), systemImage: "internaldrive")
+                        Spacer()
+                        Text("\(model.contextHealth.taskCount) tasks · \(model.contextHealth.evidenceCount) evidence · \(model.contextHealth.semanticVectorCount) vectors")
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.subheadline)
+                    Button("Rebuild semantic index") { model.rebuildSemanticIndex() }
+                        .disabled(!model.contextStorage.semanticSearchEnabled)
+                }
+                .padding(18)
+                .cardStyle()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    SectionHeading(
+                        title: "Custom redaction",
+                        subtitle: "Mandatory credential rules cannot be disabled. Add up to 20 extra literal or restricted-regex rules."
+                    )
+                    Divider()
+                    HStack {
+                        TextField(ruleIsRegex ? "Bounded regular expression" : "Literal text to redact", text: $ruleDraft)
+                        Toggle("Regex", isOn: $ruleIsRegex).toggleStyle(.checkbox)
+                        Button("Add") {
+                            if model.addCustomRedactionRule(ruleDraft, regex: ruleIsRegex) { ruleDraft = "" }
+                        }
+                        .disabled(ruleDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    ForEach(model.customRedactionLiterals, id: \.self) { rule in
+                        RedactionRuleRow(rule: rule, type: "Literal") { model.removeCustomRedactionRule(rule, regex: false) }
+                    }
+                    ForEach(model.customRedactionRegexes, id: \.self) { rule in
+                        RedactionRuleRow(rule: rule, type: "Regex") { model.removeCustomRedactionRule(rule, regex: true) }
+                    }
+                    Text("Policy version \(model.contextStorage.redactionPolicyVersion). Built-ins cover bearer tokens, secret assignments, provider tokens, JWTs, private keys, URL credentials, and browser URL parameters.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                .padding(18)
+                .cardStyle()
+            }
+            .padding(30)
+            .frame(maxWidth: 900, alignment: .leading)
+        }
+        .navigationTitle("Settings")
+        .onAppear {
+            retention = model.contextStorage.rawRetentionDays ?? -1
+            model.refreshContextMemory()
+        }
+    }
+}
+
+private struct RedactionRuleRow: View {
+    let rule: String
+    let type: String
+    let remove: () -> Void
+
+    var body: some View {
+        HStack {
+            Text(type).font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 48, alignment: .leading)
+            Text(rule).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+            Spacer()
+            Button("Remove", role: .destructive, action: remove)
         }
     }
 }
@@ -264,40 +371,61 @@ private struct ActivityView: View {
 private struct MemoryView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
+    @State private var application = ""
+    @State private var workstream = ""
+    @State private var pinnedOnly = false
+    @State private var useDateFilter = false
+    @State private var fromDate = Calendar.current.date(byAdding: .day, value: -1, to: .now) ?? .now
+    @State private var toDate = Date.now
+    @State private var selectedTaskIDs: Set<String> = []
+    @State private var selectedSpanIDs: Set<String> = []
+    @State private var renamePresented = false
+    @State private var renameDraft = ""
+    @State private var deletePresented = false
 
     private var isSearching: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || !application.isEmpty || !workstream.isEmpty || pinnedOnly || useDateFilter
     }
 
-    private var episodes: [MemoryEpisode] {
-        isSearching ? model.memorySearchResults.map(\.episode) : model.recentEpisodes
+    private var tasks: [TaskMemory] {
+        isSearching ? model.contextSearchResults.map(\.task) : model.contextTasks
     }
 
-    private var selection: Binding<String?> {
-        Binding(
-            get: { model.selectedEpisode?.id },
-            set: { id in model.selectEpisode(episodes.first(where: { $0.id == id })) }
-        )
+    private var selectedTask: TaskMemory? {
+        guard selectedTaskIDs.count == 1, let id = selectedTaskIDs.first else { return nil }
+        return tasks.first(where: { $0.id == id })
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                TextField("Search projects, windows, URLs, terminal output, or typed context", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { model.searchMemory(query) }
-                    .onChange(of: query) { _, newValue in
-                        if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            model.searchMemory("")
-                        }
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    TextField("Recall projects, tasks, files, URLs, commands, or prior context", text: $query)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(search)
+                    Button("Recall", action: search)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!isSearching || model.isContextSearching)
+                    Button {
+                        model.refreshContextMemory()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
-                Button("Search") { model.searchMemory(query) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!isSearching || model.isMemorySearching)
-                Button { model.refreshMemory() } label: {
-                    Image(systemName: "arrow.clockwise")
+                    .help("Refresh V2 memory")
                 }
-                .help("Refresh memory")
+                HStack(spacing: 10) {
+                    TextField("Application", text: $application).frame(maxWidth: 180)
+                    TextField("Workstream", text: $workstream).frame(maxWidth: 220)
+                    Toggle("Pinned", isOn: $pinnedOnly).toggleStyle(.checkbox)
+                    Toggle("Date range", isOn: $useDateFilter).toggleStyle(.checkbox)
+                    if useDateFilter {
+                        DatePicker("From", selection: $fromDate).labelsHidden()
+                        Text("to").foregroundStyle(.secondary)
+                        DatePicker("To", selection: $toDate).labelsHidden()
+                    }
+                    Spacer()
+                }
             }
             .padding(16)
 
@@ -309,18 +437,18 @@ private struct MemoryView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(isSearching ? "Search results" : "Recent episodes")
                                 .font(.headline)
-                            Text(model.memoryHealth.detail)
+                            Text("\(model.contextHealth.taskCount) tasks · \(model.contextHealth.spanCount) spans · \(model.contextHealth.semanticVectorCount) vectors")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if model.isMemorySearching {
+                        if model.isContextSearching {
                             ProgressView().controlSize(.small)
                         }
                     }
                     .padding(14)
 
-                    if let error = model.memoryError {
+                    if let error = model.contextError {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.orange)
@@ -328,33 +456,55 @@ private struct MemoryView: View {
                             .padding(.bottom, 10)
                     }
 
-                    if episodes.isEmpty && !model.isMemorySearching {
+                    if tasks.isEmpty && !model.isContextSearching {
                         ContentUnavailableView(
                             isSearching ? "No matching memory" : "No episodes yet",
                             systemImage: isSearching ? "magnifyingglass" : "brain.head.profile",
-                            description: Text(isSearching ? "Try broader terms." : "Start capture and Mnemos will group observations into episodes.")
+                            description: Text(isSearching ? "Try broader terms or fewer filters." : "Mnemos will build sessions, tasks, spans, and evidence from allowed activity.")
                         )
                     } else {
-                        List(episodes, selection: selection) { episode in
-                            MemoryEpisodeRow(
-                                episode: episode,
-                                highlights: model.memorySearchResults.first(where: { $0.id == episode.id })?.highlights ?? []
-                            )
-                            .tag(episode.id)
+                        List(selection: $selectedTaskIDs) {
+                            if isSearching {
+                                ForEach(tasks) { task in
+                                    TaskMemoryRow(
+                                        task: task,
+                                        highlights: model.contextSearchResults.first(where: { $0.id == task.id })?.highlights ?? [],
+                                        reasons: model.contextSearchResults.first(where: { $0.id == task.id })?.matchReasons ?? []
+                                    ).tag(task.id)
+                                }
+                            } else {
+                                ForEach(model.contextSessions) { session in
+                                    let sessionTasks = tasks.filter { $0.sessionID == session.id }
+                                    if !sessionTasks.isEmpty {
+                                        Section {
+                                            ForEach(sessionTasks) { task in
+                                                TaskMemoryRow(task: task, highlights: [], reasons: [])
+                                                    .tag(task.id)
+                                            }
+                                        } header: {
+                                            Text(session.startedAt, format: .dateTime.weekday().day().month().hour().minute())
+                                        }
+                                    }
+                                }
+                            }
                         }
                         .listStyle(.inset)
+                        .onChange(of: selectedTaskIDs) { _, _ in
+                            model.selectTask(selectedTask)
+                            selectedSpanIDs = []
+                        }
                     }
                 }
                 .frame(minWidth: 330, idealWidth: 430)
 
                 Group {
-                    if let episode = model.selectedEpisode {
-                        MemoryEpisodeDetail(episode: episode, evidence: model.selectedEpisodeEvidence)
+                    if let task = model.selectedTask {
+                        TaskMemoryDetail(task: task, selectedSpanIDs: $selectedSpanIDs)
                     } else {
                         ContentUnavailableView(
-                            "Select an episode",
+                            selectedTaskIDs.count > 1 ? "Multiple tasks selected" : "Select a task",
                             systemImage: "doc.text.magnifyingglass",
-                            description: Text("Inspect the episode summary and the observations that support it.")
+                            description: Text(selectedTaskIDs.count > 1 ? "Use Merge to combine selected tasks from one session." : "Inspect spans and durable supporting evidence.")
                         )
                     }
                 }
@@ -362,21 +512,82 @@ private struct MemoryView: View {
             }
         }
         .navigationTitle("Memory")
-        .onAppear { model.refreshMemory() }
+        .toolbar {
+            ToolbarItemGroup {
+                Button("Merge") { model.mergeTasks(Array(selectedTaskIDs)) }
+                    .disabled(selectedTaskIDs.count < 2)
+                Button("Split spans") { model.splitSpans(Array(selectedSpanIDs)) }
+                    .disabled(selectedSpanIDs.isEmpty || model.selectedTask == nil)
+                Menu("Move spans") {
+                    ForEach(model.contextTasks.filter { $0.id != model.selectedTask?.id }) { task in
+                        Button(task.title) {
+                            model.moveSpans(Array(selectedSpanIDs), to: task.id)
+                            selectedSpanIDs = []
+                        }
+                    }
+                }
+                .disabled(selectedSpanIDs.isEmpty || model.contextTasks.count < 2)
+                Menu("Workstream") {
+                    Button("Unassigned") { model.assignSelectedTask(to: nil) }
+                    Divider()
+                    ForEach(model.contextWorkstreams) { stream in
+                        Button(stream.displayName) { model.assignSelectedTask(to: stream.id) }
+                    }
+                }
+                .disabled(model.selectedTask == nil)
+                Button(model.selectedTask?.isPinned == true ? "Unpin" : "Pin") { model.toggleSelectedTaskPin() }
+                    .disabled(model.selectedTask == nil)
+                Button("Rename") {
+                    renameDraft = model.selectedTask?.title ?? ""
+                    renamePresented = true
+                }
+                .disabled(model.selectedTask == nil)
+                Button("Delete", role: .destructive) { deletePresented = true }
+                    .disabled(model.selectedTask == nil)
+            }
+        }
+        .alert("Rename task", isPresented: $renamePresented) {
+            TextField("Task title", text: $renameDraft)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { model.renameSelectedTask(renameDraft) }
+        }
+        .alert("Delete this task and its source activity?", isPresented: $deletePresented) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                model.deleteSelectedTask()
+                selectedTaskIDs = []
+            }
+        } message: {
+            Text("This removes raw observations, compact evidence, full-text entries, vectors, and legacy derived copies.")
+        }
+        .onAppear { model.refreshContextMemory() }
+    }
+
+    private func search() {
+        model.searchContext(
+            query,
+            from: useDateFilter ? fromDate : nil,
+            to: useDateFilter ? toDate : nil,
+            application: application.isEmpty ? nil : application,
+            workstream: workstream.isEmpty ? nil : workstream,
+            pinnedOnly: pinnedOnly
+        )
     }
 }
 
-private struct MemoryEpisodeRow: View {
-    let episode: MemoryEpisode
+private struct TaskMemoryRow: View {
+    let task: TaskMemory
     let highlights: [String]
+    let reasons: [String]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(episode.title)
+                if task.isPinned { Image(systemName: "pin.fill").foregroundStyle(.orange) }
+                Text(task.title)
                     .font(.headline)
                     .lineLimit(1)
-                if episode.isOpen {
+                if task.isOpen {
                     Text("Live")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.green)
@@ -385,11 +596,11 @@ private struct MemoryEpisodeRow: View {
                         .background(.green.opacity(0.12), in: Capsule())
                 }
                 Spacer()
-                Text(episode.endedAt, format: .dateTime.hour().minute())
+                Text(task.endedAt, format: .dateTime.hour().minute())
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            Text(episode.summary)
+            Text(task.digest)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -400,11 +611,12 @@ private struct MemoryEpisodeRow: View {
                     .lineLimit(2)
             }
             HStack(spacing: 8) {
-                Label("\(episode.eventCount)", systemImage: "text.append")
-                if let project = episode.projectKey {
-                    Label(project, systemImage: "folder")
+                Label("\(task.eventCount)", systemImage: "text.append")
+                if let workstream = task.workstream {
+                    Label(workstream.displayName, systemImage: "point.3.connected.trianglepath.dotted")
                         .lineLimit(1)
                 }
+                if !reasons.isEmpty { Text(reasons.joined(separator: " + ")) }
             }
             .font(.caption)
             .foregroundStyle(.tertiary)
@@ -413,37 +625,68 @@ private struct MemoryEpisodeRow: View {
     }
 }
 
-private struct MemoryEpisodeDetail: View {
-    let episode: MemoryEpisode
-    let evidence: [EpisodeEvidence]
+private struct TaskMemoryDetail: View {
+    let task: TaskMemory
+    @Binding var selectedSpanIDs: Set<String>
+    @EnvironmentObject private var model: AppModel
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text(episode.title).font(.title2.weight(.semibold))
-                    Text(episode.summary).foregroundStyle(.secondary)
-                    Text(episode.startedAt, format: .dateTime.day().month().year().hour().minute())
+                    HStack {
+                        Text(task.title).font(.title2.weight(.semibold))
+                        if task.isPinned { Image(systemName: "pin.fill").foregroundStyle(.orange) }
+                    }
+                    Text(task.digest).foregroundStyle(.secondary)
+                    Text(task.startedAt, format: .dateTime.day().month().year().hour().minute())
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.tertiary)
+                    Text("Grouping \(Int(task.groupingConfidence * 100))% · \(task.groupingReasons.joined(separator: ", "))")
+                        .font(.caption).foregroundStyle(.tertiary)
                 }
 
-                if let state = episode.lastState {
+                if let state = task.lastState {
                     DetailBlock(title: "Last known state", value: state, symbol: "flag.checkered")
                 }
-                if !episode.applications.isEmpty {
-                    DetailBlock(title: "Applications", value: episode.applications.joined(separator: ", "), symbol: "app.dashed")
+                if let stream = task.workstream {
+                    DetailBlock(title: "Workstream", value: "\(stream.displayName)\n\(stream.canonicalKey)", symbol: "point.3.connected.trianglepath.dotted")
                 }
-                if !episode.artifacts.isEmpty {
-                    DetailBlock(title: "Artifacts", value: episode.artifacts.joined(separator: "\n"), symbol: "link")
+                if !task.actions.isEmpty {
+                    DetailBlock(title: "Actions", value: task.actions.joined(separator: ", "), symbol: "bolt")
+                }
+                if !task.artifacts.isEmpty {
+                    DetailBlock(title: "Artifacts", value: task.artifacts.joined(separator: "\n"), symbol: "link")
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Evidence").font(.headline)
-                    if evidence.isEmpty {
+                    HStack {
+                        Text("Activity spans").font(.headline)
+                        Spacer()
+                        Text("Select spans to split").font(.caption).foregroundStyle(.secondary)
+                    }
+                    List(model.selectedTaskSpans, selection: $selectedSpanIDs) { span in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(span.applicationName).font(.subheadline.weight(.medium))
+                                Spacer()
+                                Text(span.startedAt, format: .dateTime.hour().minute().second())
+                                    .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                            }
+                            Text(span.windowTitle ?? span.anchorKey ?? "Application context")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        .tag(span.id)
+                    }
+                    .frame(minHeight: 150, maxHeight: 260)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Durable evidence").font(.headline)
+                    if model.selectedTaskEvidence.isEmpty {
                         ProgressView().controlSize(.small)
                     } else {
-                        ForEach(evidence) { item in
+                        ForEach(model.selectedTaskEvidence) { item in
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text(item.applicationName).font(.subheadline.weight(.medium))
@@ -453,12 +696,13 @@ private struct MemoryEpisodeDetail: View {
                                         .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.tertiary)
                                 }
-                                if let title = item.windowTitle { Text(title).font(.subheadline).lineLimit(2) }
-                                if let detail = item.detail { Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                                if let detail = item.excerpt { Text(detail).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
                                 if let target = item.target { Text(target).font(.caption2).foregroundStyle(.tertiary) }
                                 if let artifact = item.url ?? item.documentPath {
                                     Text(artifact).font(.caption2.monospaced()).foregroundStyle(.tertiary).textSelection(.enabled)
                                 }
+                                Text("\(item.source.rawValue) · redaction policy v\(item.redactionPolicyVersion)")
+                                    .font(.caption2).foregroundStyle(.tertiary)
                             }
                             .padding(10)
                             .background(.quaternary.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
@@ -538,15 +782,19 @@ private struct AgentAccessView: View {
                         subtitle: "The TypeScript stdio MCP adapter calls these endpoints; agents never open SQLite."
                     )
                     Divider()
-                    AgentEndpointRow(method: "GET", path: "/v1/health", detail: "Storage health and counts")
+                    AgentEndpointRow(method: "GET", path: "/v2/health", detail: "Context index health and counts")
                     Divider().padding(.leading, 78)
-                    AgentEndpointRow(method: "GET", path: "/v1/episodes/recent", detail: "Recent memory episodes")
+                    AgentEndpointRow(method: "GET", path: "/v2/sessions/recent", detail: "Session-grouped recent tasks")
                     Divider().padding(.leading, 78)
-                    AgentEndpointRow(method: "GET", path: "/v1/search?q=…", detail: "Ranked episode retrieval")
+                    AgentEndpointRow(method: "GET", path: "/v2/search?q=…", detail: "Filtered hybrid task retrieval")
                     Divider().padding(.leading, 78)
-                    AgentEndpointRow(method: "GET", path: "/v1/episodes/{id}", detail: "One episode summary")
+                    AgentEndpointRow(method: "GET", path: "/v2/context?q=…", detail: "Bounded context pack")
                     Divider().padding(.leading, 78)
-                    AgentEndpointRow(method: "GET", path: "/v1/episodes/{id}/evidence", detail: "Supporting observations")
+                    AgentEndpointRow(method: "GET", path: "/v2/tasks/{id}", detail: "Task, spans, and neighboring state")
+                    Divider().padding(.leading, 78)
+                    AgentEndpointRow(method: "GET", path: "/v2/tasks/{id}/evidence", detail: "Paginated compact evidence")
+                    Divider().padding(.leading, 78)
+                    AgentEndpointRow(method: "GET", path: "/v2/timeline", detail: "Explicit time-range context")
                 }
                 .cardStyle()
 

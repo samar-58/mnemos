@@ -64,6 +64,7 @@ actor LocalMemoryAPI {
     }
 
     private let memoryStore: SQLiteMemoryStore
+    private let contextStore: ContextEngineStore
     private let queue = DispatchQueue(label: "dev.mnemos.agent-api", qos: .userInitiated)
     private let port: UInt16 = 17_373
     private let maximumRequestBytes = 32 * 1_024
@@ -72,8 +73,9 @@ actor LocalMemoryAPI {
     private var bearerToken = ""
     private var status: AgentAPIStatus = .stopped
 
-    init(memoryStore: SQLiteMemoryStore) {
+    init(memoryStore: SQLiteMemoryStore, contextStore: ContextEngineStore) {
         self.memoryStore = memoryStore
+        self.contextStore = contextStore
         let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -256,6 +258,33 @@ actor LocalMemoryAPI {
 
         do {
             switch path {
+            case "/v2/health":
+                return try jsonResponse(APIEnvelope(data: await contextStore.health()))
+
+            case "/v2/sessions/recent":
+                let limit = Self.boundedLimit(queryItems["limit"], defaultValue: 20, maximum: 50)
+                async let sessions = contextStore.recentSessions(limit: limit)
+                async let tasks = contextStore.recentTasks(limit: limit)
+                return try await jsonResponse(
+                    APIEnvelope(data: RecentActivity(sessions: sessions, tasks: tasks))
+                )
+
+            case "/v2/search", "/v2/context":
+                let query = try Self.contextQuery(queryItems)
+                if path == "/v2/context" {
+                    return try jsonResponse(APIEnvelope(data: try await contextStore.recall(query)))
+                }
+                return try jsonResponse(APIEnvelope(data: try await contextStore.search(query)))
+
+            case "/v2/timeline":
+                guard let from = Self.parseDate(queryItems["from"]),
+                      let to = Self.parseDate(queryItems["to"]),
+                      from <= to else {
+                    return errorResponse(status: 400, reason: "Bad Request", message: "Valid RFC3339 from and to parameters are required.")
+                }
+                let limit = Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 100)
+                return try jsonResponse(APIEnvelope(data: try await contextStore.timeline(from: from, to: to, limit: limit)))
+
             case "/v1/health":
                 let health = await memoryStore.health()
                 let state: String
@@ -287,6 +316,29 @@ actor LocalMemoryAPI {
 
             default:
                 let segments = path.split(separator: "/").map(String.init)
+                if segments.count >= 3, segments[0] == "v2", segments[1] == "tasks",
+                   let taskID = segments[2].removingPercentEncoding, !taskID.isEmpty {
+                    if segments.count == 3 {
+                        guard let context = try await contextStore.context(for: taskID) else {
+                            return errorResponse(status: 404, reason: "Not Found", message: "Task not found.")
+                        }
+                        return try jsonResponse(APIEnvelope(data: context))
+                    }
+                    if segments.count == 4, segments[3] == "evidence" {
+                        let limit = Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 200)
+                        guard try await contextStore.task(id: taskID) != nil else {
+                            return errorResponse(status: 404, reason: "Not Found", message: "Task not found.")
+                        }
+                        let items = try await contextStore.evidence(
+                            for: taskID,
+                            limit: limit,
+                            before: Self.parseDate(queryItems["before"])
+                        )
+                        let cursor = items.count == limit ? items.first?.timestamp.ISO8601Format() : nil
+                        return try jsonResponse(EvidencePage(data: items, nextCursor: cursor))
+                    }
+                    return errorResponse(status: 404, reason: "Not Found", message: "Unknown V2 task endpoint.")
+                }
                 guard segments.count >= 3,
                       segments[0] == "v1",
                       segments[1] == "episodes",
@@ -312,6 +364,12 @@ actor LocalMemoryAPI {
 
                 return errorResponse(status: 404, reason: "Not Found", message: "Unknown endpoint.")
             }
+        } catch let error as NSError where error.domain == "MnemosAgentAPI" && error.code == 400 {
+            return errorResponse(
+                status: 400,
+                reason: "Bad Request",
+                message: error.localizedDescription
+            )
         } catch {
             return errorResponse(status: 500, reason: "Internal Server Error", message: "Memory retrieval failed.")
         }
@@ -354,7 +412,7 @@ actor LocalMemoryAPI {
             attributes: [.posixPermissions: 0o700]
         )
         let configuration = APIConfiguration(
-            apiVersion: 1,
+            apiVersion: 2,
             baseURL: "http://127.0.0.1:\(port)",
             bearerToken: bearerToken,
             processID: ProcessInfo.processInfo.processIdentifier
@@ -388,5 +446,43 @@ actor LocalMemoryAPI {
     private static func boundedLimit(_ value: String?, defaultValue: Int, maximum: Int) -> Int {
         guard let value, let parsed = Int(value) else { return defaultValue }
         return min(max(parsed, 1), maximum)
+    }
+
+    private static func contextQuery(_ items: [String: String]) throws -> MemoryQuery {
+        let text = items["q"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let from = items["from"].flatMap(parseDate)
+        let to = items["to"].flatMap(parseDate)
+        if (items["from"] != nil && from == nil) || (items["to"] != nil && to == nil) {
+            throw NSError(domain: "MnemosAgentAPI", code: 400, userInfo: [
+                NSLocalizedDescriptionKey: "Time filters must be valid RFC3339 timestamps."
+            ])
+        }
+        guard text?.isEmpty == false || from != nil || to != nil || items["application"] != nil
+                || items["workstream"] != nil || items["pinned"] == "true" else {
+            throw NSError(domain: "MnemosAgentAPI", code: 400, userInfo: [
+                NSLocalizedDescriptionKey: "Provide q or at least one structured filter."
+            ])
+        }
+        if let from, let to, from > to {
+            throw NSError(domain: "MnemosAgentAPI", code: 400, userInfo: [
+                NSLocalizedDescriptionKey: "The from date must not be after to."
+            ])
+        }
+        return MemoryQuery(
+            text: text?.isEmpty == false ? text : nil,
+            from: from,
+            to: to,
+            application: items["application"],
+            workstream: items["workstream"],
+            pinnedOnly: items["pinned"] == "true",
+            limit: boundedLimit(items["limit"], defaultValue: 10, maximum: 50)
+        )
+    }
+
+    private static func parseDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: value) ?? ISO8601DateFormatter().date(from: value)
     }
 }

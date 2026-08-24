@@ -23,11 +23,15 @@ actor SQLiteMemoryStore {
     private let databaseURL: URL
     private let rawRetentionDays = 30
 
-    init() {
+    init(databaseURL: URL? = nil) {
+        if let databaseURL {
+            self.databaseURL = databaseURL
+            return
+        }
         let fileManager = FileManager.default
         let root = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Mnemos", isDirectory: true)
-        databaseURL = root.appendingPathComponent("mnemos.sqlite", isDirectory: false)
+        self.databaseURL = root.appendingPathComponent("mnemos.sqlite", isDirectory: false)
     }
 
     private func prepareIfNeeded() throws {
@@ -67,6 +71,7 @@ actor SQLiteMemoryStore {
     }
 
     func record(_ event: CapturedEvent) throws {
+        guard let event = CapturePrivacy.sanitizedEvent(event) else { return }
         try prepareIfNeeded()
 
         try execute("BEGIN IMMEDIATE TRANSACTION")
@@ -83,6 +88,11 @@ actor SQLiteMemoryStore {
             try? execute("ROLLBACK")
             throw error
         }
+    }
+
+    func shutdownForTesting() {
+        if let database { sqlite3_close(database) }
+        database = nil
     }
 
     func health() -> MemoryStoreHealth {
