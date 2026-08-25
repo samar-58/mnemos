@@ -320,6 +320,51 @@ actor ContextEngineStore {
         return workstreams
     }
 
+    /// Workstreams with their task counts and most recent activity, ordered by
+    /// recency so the sidebar shows live work first. Workstreams that have lost
+    /// all of their tasks sort last and report no activity.
+    func workstreamSummaries() throws -> [WorkstreamSummary] {
+        try prepareIfNeeded()
+        var summaries: [WorkstreamSummary] = []
+        try withStatement(
+            """
+            SELECT w.id, w.kind, w.canonical_key, w.display_name, w.user_confirmed,
+                   COUNT(t.id), MAX(t.ended_at)
+            FROM workstreams w
+            LEFT JOIN task_episodes_v2 t ON t.workstream_id = w.id
+            GROUP BY w.id
+            ORDER BY MAX(t.ended_at) DESC, w.display_name COLLATE NOCASE
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let count = Int(sqlite3_column_int64(statement, 5))
+                summaries.append(WorkstreamSummary(
+                    workstream: decodeWorkstream(statement, offset: 0),
+                    taskCount: count,
+                    lastActivityAt: sqlite3_column_type(statement, 6) == SQLITE_NULL ? nil : dateColumn(statement, 6)
+                ))
+            }
+        }
+        return summaries
+    }
+
+    /// Page backwards through tasks by end time. Passing `before` continues from
+    /// the oldest task already on screen.
+    func tasks(before: Date? = nil, limit: Int = 50) throws -> [TaskMemory] {
+        try prepareIfNeeded()
+        let capped = min(max(limit, 1), 200)
+        guard let before else {
+            return try queryTasks(
+                "\(taskSelectSQL) ORDER BY t.ended_at DESC LIMIT ?",
+                values: [.int(capped)]
+            )
+        }
+        return try queryTasks(
+            "\(taskSelectSQL) WHERE t.ended_at < ? ORDER BY t.ended_at DESC LIMIT ?",
+            values: [.double(before.timeIntervalSince1970), .int(capped)]
+        )
+    }
+
     func recentTasks(limit: Int = 30) throws -> [TaskMemory] {
         try prepareIfNeeded()
         return try queryTasks(

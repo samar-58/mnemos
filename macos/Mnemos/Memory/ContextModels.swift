@@ -16,6 +16,16 @@ struct Workstream: Identifiable, Equatable, Codable, Sendable {
     let userConfirmed: Bool
 }
 
+/// A workstream with the counts the sidebar needs, so the UI does not have to
+/// load every task to label a row.
+struct WorkstreamSummary: Identifiable, Equatable, Codable, Sendable {
+    let workstream: Workstream
+    let taskCount: Int
+    let lastActivityAt: Date?
+
+    var id: String { workstream.id }
+}
+
 struct WorkSession: Identifiable, Equatable, Codable, Sendable {
     let id: String
     let startedAt: Date

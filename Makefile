@@ -3,7 +3,10 @@ SCHEME := Mnemos
 DERIVED_DATA := .deriveddata
 APP := $(DERIVED_DATA)/Build/Products/Debug/Mnemos.app
 
-.PHONY: project build test run open clean mcp-install mcp-build mcp-smoke
+.PHONY: project build test run open clean icons mcp-install mcp-build mcp-smoke
+
+icons:
+	swift scripts/generate-icons.swift
 
 project:
 	xcodegen generate --spec project.yml --project macos --project-root .

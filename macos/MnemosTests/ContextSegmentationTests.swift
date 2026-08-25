@@ -251,6 +251,70 @@ final class ContextSegmentationTests: XCTestCase {
         try await fixture.context.setSemanticSearchEnabled(true)
         await fixture.shutdown()
     }
+
+    func testWorkstreamSummariesCountTasksAndFollowDeletions() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let repository = try fixture.makeRepository(owner: "acme", name: "widget")
+        let start = Date.now
+
+        try await fixture.record(event(
+            at: start, app: "Ghostty", bundle: "com.mitchellh.ghostty",
+            window: "widget", path: repository.path, detail: "swift build"
+        ))
+        try await fixture.record(event(
+            at: start.addingTimeInterval(30), app: "Notes", bundle: "com.apple.Notes", window: "Shopping"
+        ))
+
+        let summaries = try await fixture.context.workstreamSummaries()
+        let repositorySummary = try XCTUnwrap(
+            summaries.first(where: { $0.workstream.canonicalKey == "github.com/acme/widget" })
+        )
+        XCTAssertEqual(repositorySummary.taskCount, 1)
+        XCTAssertNotNil(repositorySummary.lastActivityAt, "A workstream with tasks must report its last activity.")
+
+        let tasks = try await fixture.context.recentTasks(limit: 20)
+        let repositoryTask = try XCTUnwrap(
+            tasks.first(where: { $0.workstream?.canonicalKey == "github.com/acme/widget" })
+        )
+        try await fixture.context.deleteTask(id: repositoryTask.id)
+
+        let afterDeletion = try await fixture.context.workstreamSummaries()
+        let emptied = try XCTUnwrap(
+            afterDeletion.first(where: { $0.workstream.canonicalKey == "github.com/acme/widget" })
+        )
+        XCTAssertEqual(emptied.taskCount, 0)
+        XCTAssertNil(emptied.lastActivityAt, "A workstream that lost every task reports no activity.")
+        await fixture.shutdown()
+    }
+
+    func testTaskPagingWalksBackwardsWithoutRepeating() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let start = Date.now
+        for index in 0..<5 {
+            try await fixture.record(event(
+                at: start.addingTimeInterval(Double(index)), app: "App \(index)",
+                bundle: "dev.fixture.app\(index)", window: "Window \(index)"
+            ))
+        }
+
+        let all = try await fixture.context.tasks(before: nil, limit: 50)
+        XCTAssertEqual(all.count, 5)
+        XCTAssertEqual(all, all.sorted { $0.endedAt > $1.endedAt }, "Pages come back newest first.")
+
+        let firstPage = try await fixture.context.tasks(before: nil, limit: 2)
+        XCTAssertEqual(firstPage.map(\.id), Array(all.prefix(2).map(\.id)))
+
+        let oldest = try XCTUnwrap(firstPage.last?.endedAt)
+        let secondPage = try await fixture.context.tasks(before: oldest, limit: 2)
+        XCTAssertEqual(secondPage.map(\.id), Array(all.dropFirst(2).prefix(2).map(\.id)))
+        XCTAssertTrue(
+            Set(firstPage.map(\.id)).isDisjoint(with: Set(secondPage.map(\.id))),
+            "Paging must not repeat a task across pages."
+        )
+        await fixture.shutdown()
+    }
 }
 
 private extension ContextSegmentationTests {
