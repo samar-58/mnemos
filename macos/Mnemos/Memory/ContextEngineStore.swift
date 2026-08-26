@@ -67,7 +67,6 @@ actor ContextEngineStore {
     }
 
     private var database: OpaquePointer?
-    private var startupError: String?
     private let databaseURL: URL
     private let embeddingProvider = AppleSentenceEmbeddingProvider()
     private var anchorCache: [String: Anchor] = [:]
@@ -742,7 +741,6 @@ actor ContextEngineStore {
 
     private func prepareIfNeeded() throws {
         if database != nil { return }
-        if let startupError { throw ContextStoreError.unavailable(startupError) }
         do {
             let directory = databaseURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -763,7 +761,6 @@ actor ContextEngineStore {
             try pruneExpiredObservations(now: .now)
             applyPrivateFilePermissions()
         } catch {
-            startupError = error.localizedDescription
             if let database { sqlite3_close(database) }
             database = nil
             throw error

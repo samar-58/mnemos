@@ -332,6 +332,21 @@ final class MemoryBrowser: ObservableObject {
         }
     }
 
+    /// Surfaces a failure from capture recording directly in the list, instead
+    /// of leaving it buried in Settings ▸ Advanced ▸ Diagnostics where it reads
+    /// exactly like the list simply being stale.
+    func recordingFailed(_ message: String) {
+        error = message
+    }
+
+    /// Clears a recording failure once activity is persisting again. Most
+    /// write failures — a momentarily busy database under a burst of writes,
+    /// for instance — are transient, so a banner that never clears would
+    /// misreport a recovered app as still broken.
+    func recordingRecovered() {
+        error = nil
+    }
+
     /// Reveals a task coming from outside the list — the menu bar or the recall
     /// panel — clearing filters if it is not currently visible.
     func reveal(taskID: String) {
@@ -426,26 +441,38 @@ final class MemoryBrowser: ObservableObject {
     }
 
     /// Refreshes counts after new activity is persisted, without disturbing the
-    /// current selection or scroll position more than necessary.
+    /// current selection or scroll position more than necessary. Whatever the
+    /// list is currently showing — the unfiltered Recent page or a filtered
+    /// view (Today, Pinned, a workstream, a search) — gets a fresh look,
+    /// otherwise newly captured activity never reaches a filtered view.
     func activityDidPersist() {
         Task { [weak self] in
             guard let self else { return }
             health = await store.health()
             do {
                 sessions = try await store.recentSessions()
-                let page = try await store.tasks(before: nil, limit: Self.pageSize)
-                if !isFiltering { recentTasks = merge(page, into: recentTasks) }
                 workstreams = try await store.workstreamSummaries()
+                if isFiltering {
+                    applyFilters()
+                } else {
+                    let page = try await store.tasks(before: nil, limit: Self.pageSize)
+                    recentTasks = merge(page, into: recentTasks)
+                }
+                error = nil
             } catch {
                 self.error = error.localizedDescription
             }
         }
     }
 
-    /// Keeps already-loaded older pages while refreshing the newest page.
+    /// Keeps already-loaded older pages while refreshing the newest page. Tasks
+    /// that reappear in the fresh page (their `endedAt` moved forward because
+    /// they are still open) are deduplicated by id rather than by timestamp, so
+    /// an older snapshot of the same task never lingers alongside its update.
     private func merge(_ page: [TaskMemory], into existing: [TaskMemory]) -> [TaskMemory] {
         guard let oldest = page.last?.endedAt else { return existing }
-        let tail = existing.filter { $0.endedAt < oldest }
+        let freshIDs = Set(page.map(\.id))
+        let tail = existing.filter { !freshIDs.contains($0.id) && $0.endedAt < oldest }
         return page + tail
     }
 

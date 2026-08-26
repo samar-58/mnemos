@@ -4,6 +4,36 @@ import XCTest
 @testable import Mnemos
 
 final class ContextSegmentationTests: XCTestCase {
+    func testContextPreparationRetriesAfterTransientStartupFailure() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mnemos-retry-\(UUID().uuidString)", isDirectory: true)
+        let blockedParent = root.appendingPathComponent("blocked", isDirectory: true)
+        let database = blockedParent.appendingPathComponent("fixture.sqlite")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("not a directory".utf8).write(to: blockedParent)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let context = ContextEngineStore(databaseURL: database)
+        do {
+            try await context.prepare()
+            XCTFail("Preparation should fail while the database parent is a file.")
+        } catch {
+            // The next attempt must be allowed to retry after the transient failure.
+        }
+
+        try FileManager.default.removeItem(at: blockedParent)
+        let legacy = SQLiteMemoryStore(databaseURL: database)
+        try await legacy.record(event(
+            at: .now, app: "Fixture App", bundle: "dev.fixture.retry", window: "Retry fixture"
+        ))
+        try await context.prepare()
+
+        let tasks = try await context.recentTasks(limit: 10)
+        XCTAssertEqual(tasks.count, 1)
+        await context.shutdownForTesting()
+        await legacy.shutdownForTesting()
+    }
+
     func testCrossApplicationProjectWorkAndCommunicationInterruption() async throws {
         let fixture = try Fixture()
         defer { fixture.removeFiles() }

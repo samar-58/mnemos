@@ -19,7 +19,6 @@ actor SQLiteMemoryStore {
     }
 
     private var database: OpaquePointer?
-    private var startupError: String?
     private let databaseURL: URL
     private let rawRetentionDays = 30
 
@@ -36,7 +35,6 @@ actor SQLiteMemoryStore {
 
     private func prepareIfNeeded() throws {
         if database != nil { return }
-        if let startupError { throw MemoryStoreError.unavailable(startupError) }
         let fileManager = FileManager.default
         let root = databaseURL.deletingLastPathComponent()
         do {
@@ -63,7 +61,6 @@ actor SQLiteMemoryStore {
             try pruneExpiredObservations(now: .now)
             applyPrivateFilePermissions()
         } catch {
-            startupError = error.localizedDescription
             if let database { sqlite3_close(database) }
             database = nil
             throw error

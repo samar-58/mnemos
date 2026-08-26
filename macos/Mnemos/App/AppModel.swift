@@ -83,8 +83,7 @@ final class AppModel: ObservableObject {
         customRedactionRegexes = UserDefaults.standard.stringArray(forKey: CapturePrivacy.customRegexDefaultsKey) ?? []
         refreshAvailableApplications()
         if !accessibilityTrusted { status = .permissionRequired }
-        refreshMemory()
-        browser.refresh()
+        prepareMemoryStores()
         Task { [weak self] in
             guard let self else { return }
             guard !isRunningUnitTests else { return }
@@ -313,6 +312,16 @@ final class AppModel: ObservableObject {
 
     // MARK: - Internals
 
+    /// Both stores share one SQLite file. Preparing the legacy schema first
+    /// prevents their startup migrations from racing for the database lock.
+    private func prepareMemoryStores() {
+        Task { [weak self] in
+            guard let self else { return }
+            memoryHealth = await memoryStore.health()
+            browser.refresh()
+        }
+    }
+
     private func tick() {
         let trusted = AccessibilityCaptureService.isTrusted
         if trusted != accessibilityTrusted {
@@ -355,6 +364,7 @@ final class AppModel: ObservableObject {
             do {
                 try await memoryStore.record(event)
                 try await contextStore.record(event)
+                browser.recordingRecovered()
                 persistedSinceRefresh += 1
                 if persistedSinceRefresh >= 5 {
                     persistedSinceRefresh = 0
@@ -367,6 +377,7 @@ final class AppModel: ObservableObject {
                     observationCount: memoryHealth.observationCount,
                     episodeCount: memoryHealth.episodeCount
                 )
+                browser.recordingFailed("Recording stopped updating your memory: \(error.localizedDescription)")
             }
         }
     }
