@@ -47,6 +47,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var workflowPatterns: [WorkflowPattern] = []
     @Published private(set) var personalSkills: [PersonalSkill] = []
     @Published private(set) var skillActivity: [String: SkillActivity] = [:]
+    @Published private(set) var agentGrants: [AgentGrant] = []
+    /// Shown once, immediately after a grant is issued. Mnemos stores only the
+    /// hash, so this is the single opportunity to copy the token.
+    @Published var issuedGrantToken: (name: String, token: String)?
     /// Which tab the Settings window should show when it is opened from code.
     @Published var settingsTab: SettingsTab = .general
 
@@ -379,6 +383,64 @@ final class AppModel: ObservableObject {
                 ?? .empty(skillID: skill.id)
         }
         skillActivity = activity
+    }
+
+    // MARK: - Per-agent grants
+
+    func refreshAgentGrants() async {
+        agentGrants = (try? await personalContextStore.grants()) ?? []
+    }
+
+    func createAgentGrant(name: String, capabilities: [AgentCapability]) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let issued = try await personalContextStore.createGrant(
+                    displayName: name, capabilities: capabilities
+                )
+                issuedGrantToken = (issued.grant.displayName, issued.token)
+                await refreshAgentGrants()
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    func setAgentGrantCapability(_ id: String, capability: AgentCapability, allowed: Bool) {
+        Task { [weak self] in
+            guard let self else { return }
+            guard let grant = agentGrants.first(where: { $0.id == id }) else { return }
+            var capabilities = Set(grant.capabilities)
+            if allowed { capabilities.insert(capability) } else { capabilities.remove(capability) }
+            do {
+                try await personalContextStore.setGrantCapabilities(
+                    id: id, capabilities: AgentCapability.allCases.filter { capabilities.contains($0) }
+                )
+                await refreshAgentGrants()
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    func revokeAgentGrant(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            try? await personalContextStore.revokeGrant(id: id)
+            await refreshAgentGrants()
+        }
+    }
+
+    func restoreAgentGrant(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            try? await personalContextStore.restoreGrant(id: id)
+            await refreshAgentGrants()
+        }
+    }
+
+    func deleteAgentGrant(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            try? await personalContextStore.deleteGrant(id: id)
+            await refreshAgentGrants()
+        }
     }
 
     /// Resolves the derived memories behind a pattern's occurrences, so a

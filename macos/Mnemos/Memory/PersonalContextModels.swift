@@ -219,6 +219,41 @@ struct PersonalContextPack: Equatable, Codable, Sendable {
     let generatedAt: Date
 }
 
+/// What one agent is allowed to read. Evidence is deliberately separate from
+/// memories and skills: raw captured excerpts are the most sensitive surface,
+/// so an agent can hold derived context without ever reading the source text.
+enum AgentCapability: String, Codable, CaseIterable, Sendable {
+    case memories
+    case skills
+    case evidence
+
+    var label: String {
+        switch self {
+        case .memories: "Memories and project state"
+        case .skills: "Approved skills"
+        case .evidence: "Raw captured evidence"
+        }
+    }
+}
+
+struct AgentGrant: Identifiable, Equatable, Codable, Sendable {
+    let id: String
+    let displayName: String
+    let capabilities: [AgentCapability]
+    let createdAt: Date
+    let lastUsedAt: Date?
+    let revokedAt: Date?
+    /// The built-in grant issued to locally configured agents at launch. It can
+    /// be narrowed or revoked like any other, but it is never deleted.
+    let isDefault: Bool
+
+    var isActive: Bool { revokedAt == nil }
+
+    func allows(_ capability: AgentCapability) -> Bool {
+        isActive && capabilities.contains(capability)
+    }
+}
+
 enum DerivationJobKind: String, Codable, CaseIterable, Sendable {
     case episodeExtraction = "episode_extraction"
     case dailyConsolidation = "daily_consolidation"

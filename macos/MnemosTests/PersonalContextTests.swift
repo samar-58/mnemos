@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Mnemos
@@ -152,6 +153,135 @@ final class PersonalContextTests: XCTestCase {
         await fixture.shutdown()
     }
 
+    func testGrantTokensResolveOnlyWhileActive() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        try await fixture.prepareStores()
+
+        let issued = try await fixture.personal.createGrant(
+            displayName: "Claude Code", capabilities: [.memories, .skills]
+        )
+        XCTAssertFalse(issued.token.isEmpty)
+
+        let resolved = try await fixture.personal.resolveGrant(token: issued.token)
+        XCTAssertEqual(resolved?.id, issued.grant.id)
+        XCTAssertTrue(resolved?.allows(.memories) == true)
+        XCTAssertFalse(resolved?.allows(.evidence) == true, "Evidence is a separate permission.")
+
+        // A wrong token never resolves.
+        let bogus = try await fixture.personal.resolveGrant(token: "not-a-real-token")
+        XCTAssertNil(bogus)
+
+        // Revocation takes effect immediately.
+        try await fixture.personal.revokeGrant(id: issued.grant.id)
+        let afterRevoke = try await fixture.personal.resolveGrant(token: issued.token)
+        XCTAssertNil(afterRevoke)
+
+        try await fixture.personal.restoreGrant(id: issued.grant.id)
+        let afterRestore = try await fixture.personal.resolveGrant(token: issued.token)
+        XCTAssertEqual(afterRestore?.id, issued.grant.id)
+        await fixture.shutdown()
+    }
+
+    /// The token itself is never persisted, only its hash.
+    func testGrantTokensAreNotStoredInThePlainDatabase() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        try await fixture.prepareStores()
+        let issued = try await fixture.personal.createGrant(
+            displayName: "Cursor", capabilities: [.memories]
+        )
+        await fixture.shutdown()
+
+        let raw = try Data(contentsOf: fixture.database)
+        let hash = SHA256.hash(data: Data(issued.token.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+        // Proves the row really reached this file, so the negative assertion
+        // below cannot pass merely because nothing was flushed.
+        XCTAssertNotNil(raw.range(of: Data(hash.utf8)), "The grant row should be persisted.")
+        XCTAssertNil(
+            raw.range(of: Data(issued.token.utf8)),
+            "The plaintext grant token must never appear in the database file."
+        )
+    }
+
+    /// Rotating the launch token must not silently widen a narrowed grant.
+    func testDefaultGrantKeepsItsCapabilitiesAcrossTokenRotation() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        try await fixture.prepareStores()
+
+        let first = try await fixture.personal.refreshDefaultGrant(token: "launch-token-one")
+        XCTAssertTrue(first.isDefault)
+        XCTAssertTrue(first.allows(.evidence), "The built-in grant starts with today's full access.")
+
+        try await fixture.personal.setGrantCapabilities(
+            id: PersonalContextStore.defaultGrantID, capabilities: [.memories]
+        )
+        let rotated = try await fixture.personal.refreshDefaultGrant(token: "launch-token-two")
+        XCTAssertEqual(rotated.capabilities, [.memories])
+        XCTAssertFalse(rotated.allows(.evidence))
+
+        // The old token stops working once rotated.
+        let stale = try await fixture.personal.resolveGrant(token: "launch-token-one")
+        XCTAssertNil(stale)
+        let current = try await fixture.personal.resolveGrant(token: "launch-token-two")
+        XCTAssertEqual(current?.id, PersonalContextStore.defaultGrantID)
+
+        // Rotation preserves the recorded last use rather than resetting it.
+        let storedGrant = try await fixture.personal.grant(id: PersonalContextStore.defaultGrantID)
+        let used = try XCTUnwrap(storedGrant?.lastUsedAt)
+        let afterRotation = try await fixture.personal.refreshDefaultGrant(token: "launch-token-three")
+        XCTAssertEqual(
+            afterRotation.lastUsedAt?.timeIntervalSince1970 ?? 0,
+            used.timeIntervalSince1970, accuracy: 0.001
+        )
+        await fixture.shutdown()
+    }
+
+    /// The composer's 20% action-prefix term: how far the steps taken so far
+    /// run along the start of a skill's workflow.
+    func testActionPrefixMatchScoresAlignmentNotOverlap() {
+        let workflow = ["edit_text", "run_tests", "review_changes", "commit_changes"]
+
+        // Nothing done yet, or an unrelated start, earns nothing.
+        XCTAssertEqual(PersonalContextStore.actionPrefixMatch(observed: [], workflow: workflow), 0)
+        XCTAssertEqual(
+            PersonalContextStore.actionPrefixMatch(observed: ["visit_page"], workflow: workflow), 0
+        )
+
+        // Two aligned steps out of two observed is a complete prefix so far.
+        XCTAssertEqual(
+            PersonalContextStore.actionPrefixMatch(observed: ["edit_text", "run_tests"], workflow: workflow),
+            1.0, accuracy: 0.0001
+        )
+
+        // Repeats collapse, so idling in one app neither helps nor hurts.
+        XCTAssertEqual(
+            PersonalContextStore.actionPrefixMatch(
+                observed: ["edit_text", "edit_text", "edit_text", "run_tests"], workflow: workflow
+            ),
+            1.0, accuracy: 0.0001
+        )
+
+        // Divergence stops the match: the third step breaks the alignment, so
+        // only the first two of three observed steps count.
+        XCTAssertEqual(
+            PersonalContextStore.actionPrefixMatch(
+                observed: ["edit_text", "run_tests", "visit_page"], workflow: workflow
+            ),
+            2.0 / 3.0, accuracy: 0.0001
+        )
+
+        // A later-but-matching subsequence is not a prefix, and scores nothing.
+        XCTAssertEqual(
+            PersonalContextStore.actionPrefixMatch(
+                observed: ["run_tests", "review_changes"], workflow: workflow
+            ),
+            0
+        )
+    }
+
     /// Retrieval is counted, but nothing about the agent's request is stored.
     func testSkillRetrievalIsRecordedWithoutRequestContent() async throws {
         let fixture = try Fixture()
@@ -159,10 +289,11 @@ final class PersonalContextTests: XCTestCase {
         try await fixture.prepareStores()
         try await fixture.personal.seedSkillForTesting(
             id: "skill-usage", title: "Verify Before Reporting Done",
-            // Trigger and description share wording so the ranking threshold is
-            // cleared by similarity alone, without relaxing it for the test.
+            // Trigger and description share wording, and the action prefix
+            // matches the workflow, so the threshold is cleared on the ranker's
+            // own terms rather than by relaxing it for the test.
             description: "verify outcome before reporting done", status: .candidate,
-            versions: [(id: "v1", number: 1, trigger: "verify outcome before reporting done", workflow: ["run", "verify"], approvedAt: nil)]
+            versions: [(id: "v1", number: 1, trigger: "verify outcome before reporting done", workflow: ["edit_text", "run_tests"], approvedAt: nil)]
         )
         try await fixture.personal.approveSkill(id: "skill-usage")
 
@@ -171,7 +302,8 @@ final class PersonalContextTests: XCTestCase {
         XCTAssertNil(before.lastRetrievedAt)
 
         let matched = try await fixture.personal.relevantSkills(
-            query: "verify outcome before reporting done", workstreamID: nil, applications: []
+            query: "verify outcome before reporting done", workstreamID: nil,
+            applications: [], actionPrefix: ["edit_text", "run_tests"]
         )
         XCTAssertFalse(matched.isEmpty, "The seeded trigger should match its own wording.")
 

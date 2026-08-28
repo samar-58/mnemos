@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 import SQLite3
 
 private enum PersonalContextError: LocalizedError {
@@ -433,16 +434,44 @@ actor PersonalContextStore {
     }
 
     /// The only path that hands approved skills to an agent, so it is also the
-    /// single place retrieval is recorded.
-    func relevantSkills(query: String?, workstreamID: String?, applications: [String], limit: Int = 3) throws -> [RelevantSkill] {
+    /// single place retrieval is recorded. When the caller does not supply the
+    /// actions taken so far, the latest workflow trace stands in for them.
+    func relevantSkills(
+        query: String?, workstreamID: String?, applications: [String],
+        actionPrefix: [String]? = nil, limit: Int = 3
+    ) throws -> [RelevantSkill] {
+        try prepareIfNeeded()
+        let prefix = try actionPrefix ?? currentActionPrefix(workstreamID: workstreamID)
         let matches = try rankedSkills(
-            query: query, workstreamID: workstreamID, applications: applications, limit: limit
+            query: query, workstreamID: workstreamID, applications: applications,
+            actionPrefix: prefix, limit: limit
         )
         try? recordSkillRetrieval(skillIDs: matches.map(\.skill.id))
         return matches
     }
 
-    private func rankedSkills(query: String?, workstreamID: String?, applications: [String], limit: Int) throws -> [RelevantSkill] {
+    /// The actions already taken in the most recent trace. This is what "where
+    /// the user is right now" means to the ranker.
+    func currentActionPrefix(workstreamID: String?, limit: Int = 8) throws -> [String] {
+        try prepareIfNeeded()
+        var sql = "SELECT actions_json FROM workflow_traces"
+        var values: [SQLValue] = []
+        if let workstreamID {
+            sql += " WHERE workstream_id = ?"
+            values.append(.text(workstreamID))
+        }
+        sql += " ORDER BY ended_at DESC LIMIT 1"
+        var actions: [String] = []
+        try withStatement(sql, values: values) { statement in
+            if sqlite3_step(statement) == SQLITE_ROW { actions = decodeList(columnText(statement, 0)) }
+        }
+        return Array(Self.collapsingRuns(actions).suffix(max(limit, 1)))
+    }
+
+    private func rankedSkills(
+        query: String?, workstreamID: String?, applications: [String],
+        actionPrefix: [String], limit: Int
+    ) throws -> [RelevantSkill] {
         let approved = try skills(status: .approved, limit: 200)
         let queryTokens = tokenSet(query ?? "")
         let applicationTokens = tokenSet(applications.joined(separator: " "))
@@ -452,18 +481,213 @@ actor PersonalContextStore {
             let triggerTokens = tokenSet("\(version.trigger) \(skill.description)")
             let semantic = jaccard(queryTokens, triggerTokens)
             let scope = skill.scopeWorkstreamID == nil ? 0.55 : (skill.scopeWorkstreamID == workstreamID ? 1 : 0)
+            let prefixMatch = Self.actionPrefixMatch(observed: actionPrefix, workflow: version.workflow)
             let appMatch = jaccard(applicationTokens, triggerTokens)
-            let score = 0.35 * semantic + 0.25 * scope + 0.20 * semantic + 0.10 * appMatch
+            let score = 0.35 * semantic + 0.25 * scope + 0.20 * prefixMatch + 0.10 * appMatch
                 + 0.10 * skill.confidence
             guard score >= 0.62 else { return nil }
             var reasons: [String] = []
             if semantic > 0 { reasons.append("trigger") }
             if scope == 1 { reasons.append("workstream") }
+            if prefixMatch > 0 { reasons.append("current steps") }
             if appMatch > 0 { reasons.append("application") }
             return RelevantSkill(skill: skill, version: version, score: score, matchReasons: reasons)
         }
         .sorted { $0.score > $1.score }
         .prefix(min(max(limit, 1), 3)).map { $0 }
+    }
+
+    /// How far the actions taken so far run along the start of a skill's
+    /// workflow. Repeated actions collapse first, so idling in one app cannot
+    /// inflate or break the alignment.
+    static func actionPrefixMatch(observed: [String], workflow: [String]) -> Double {
+        let left = collapsingRuns(observed)
+        let right = collapsingRuns(workflow)
+        guard !left.isEmpty, !right.isEmpty else { return 0 }
+        // Stop at the first divergence: this is a prefix match, not an overlap.
+        var aligned = 0
+        for (lhs, rhs) in zip(left, right) {
+            if lhs != rhs { break }
+            aligned += 1
+        }
+        return Double(aligned) / Double(min(left.count, right.count))
+    }
+
+    private static func collapsingRuns(_ actions: [String]) -> [String] {
+        actions.reduce(into: [String]()) { result, action in
+            if result.last != action { result.append(action) }
+        }
+    }
+
+    // MARK: - Per-agent grants
+
+    static let defaultGrantID = "grant:local-agents"
+
+    /// Issues a named grant and returns its token exactly once. Only the hash
+    /// is stored, so a lost token cannot be recovered -- only replaced.
+    func createGrant(displayName: String, capabilities: [AgentCapability]) throws -> (grant: AgentGrant, token: String) {
+        try prepareIfNeeded()
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw PersonalContextError.invalid("A grant needs a name.") }
+        guard !capabilities.isEmpty else { throw PersonalContextError.invalid("A grant needs at least one capability.") }
+        let token = try Self.generateGrantToken()
+        let id = "grant:\(UUID().uuidString.lowercased())"
+        try insertGrant(
+            id: id, displayName: name, token: token,
+            capabilities: capabilities, isDefault: false
+        )
+        guard let grant = try grant(id: id) else {
+            throw PersonalContextError.invalid("The grant could not be created.")
+        }
+        return (grant, token)
+    }
+
+    /// Rotates the built-in grant's token at each launch while preserving the
+    /// capabilities the user chose for it.
+    @discardableResult
+    func refreshDefaultGrant(token: String) throws -> AgentGrant {
+        try prepareIfNeeded()
+        let existing = try grant(id: Self.defaultGrantID)
+        let capabilities = existing?.capabilities ?? AgentCapability.allCases
+        try withStatement(
+            "DELETE FROM agent_grants WHERE id = ?", values: [.text(Self.defaultGrantID)]
+        ) { try stepDone($0) }
+        try insertGrant(
+            id: Self.defaultGrantID, displayName: existing?.displayName ?? "Local agents",
+            token: token, capabilities: capabilities, isDefault: true,
+            createdAt: existing?.createdAt, lastUsedAt: existing?.lastUsedAt,
+            revokedAt: existing?.revokedAt
+        )
+        guard let refreshed = try grant(id: Self.defaultGrantID) else {
+            throw PersonalContextError.invalid("The default grant could not be prepared.")
+        }
+        return refreshed
+    }
+
+    private func insertGrant(
+        id: String, displayName: String, token: String, capabilities: [AgentCapability],
+        isDefault: Bool, createdAt: Date? = nil, lastUsedAt: Date? = nil, revokedAt: Date? = nil
+    ) throws {
+        let encoded = try encodedString(capabilities.map(\.rawValue))
+        try withStatement(
+            """
+            INSERT INTO agent_grants(id, display_name, token_hash, capabilities_json,
+                allowed_workstream_ids_json, created_at, last_used_at, revoked_at, is_default)
+            VALUES(?, ?, ?, ?, '[]', ?, ?, ?, ?)
+            """,
+            values: [
+                .text(id), .text(displayName), .text(contentHash(token)), .text(encoded),
+                .double((createdAt ?? Date.now).timeIntervalSince1970),
+                .double(lastUsedAt?.timeIntervalSince1970 ?? 0),
+                .double(revokedAt?.timeIntervalSince1970 ?? 0), .int(isDefault ? 1 : 0),
+            ]
+        ) { statement in
+            if lastUsedAt == nil { sqlite3_bind_null(statement, 6) }
+            if revokedAt == nil { sqlite3_bind_null(statement, 7) }
+            try stepDone(statement)
+        }
+    }
+
+    func grants() throws -> [AgentGrant] {
+        try prepareIfNeeded()
+        var result: [AgentGrant] = []
+        try withStatement(
+            """
+            SELECT id, display_name, capabilities_json, created_at, last_used_at, revoked_at, is_default
+            FROM agent_grants ORDER BY is_default DESC, created_at ASC
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW { result.append(decodeGrant(statement)) }
+        }
+        return result
+    }
+
+    func grant(id: String) throws -> AgentGrant? {
+        var found: AgentGrant?
+        try withStatement(
+            """
+            SELECT id, display_name, capabilities_json, created_at, last_used_at, revoked_at, is_default
+            FROM agent_grants WHERE id = ? LIMIT 1
+            """,
+            values: [.text(id)]
+        ) { statement in
+            if sqlite3_step(statement) == SQLITE_ROW { found = decodeGrant(statement) }
+        }
+        return found
+    }
+
+    /// Resolves a presented token to an active grant and stamps its last use.
+    /// Revoked grants resolve to nil, so revocation takes effect immediately.
+    func resolveGrant(token: String) throws -> AgentGrant? {
+        try prepareIfNeeded()
+        guard !token.isEmpty else { return nil }
+        var found: AgentGrant?
+        try withStatement(
+            """
+            SELECT id, display_name, capabilities_json, created_at, last_used_at, revoked_at, is_default
+            FROM agent_grants WHERE token_hash = ? LIMIT 1
+            """,
+            values: [.text(contentHash(token))]
+        ) { statement in
+            if sqlite3_step(statement) == SQLITE_ROW { found = decodeGrant(statement) }
+        }
+        guard let found, found.isActive else { return nil }
+        try withStatement(
+            "UPDATE agent_grants SET last_used_at = ? WHERE id = ?",
+            values: [.double(Date.now.timeIntervalSince1970), .text(found.id)]
+        ) { try stepDone($0) }
+        return found
+    }
+
+    func revokeGrant(id: String) throws {
+        try prepareIfNeeded()
+        try withStatement(
+            "UPDATE agent_grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+            values: [.double(Date.now.timeIntervalSince1970), .text(id)]
+        ) { try stepDone($0) }
+    }
+
+    func restoreGrant(id: String) throws {
+        try prepareIfNeeded()
+        try withStatement(
+            "UPDATE agent_grants SET revoked_at = NULL WHERE id = ?", values: [.text(id)]
+        ) { try stepDone($0) }
+    }
+
+    func setGrantCapabilities(id: String, capabilities: [AgentCapability]) throws {
+        try prepareIfNeeded()
+        try withStatement(
+            "UPDATE agent_grants SET capabilities_json = ? WHERE id = ?",
+            values: [.text(try encodedString(capabilities.map(\.rawValue))), .text(id)]
+        ) { try stepDone($0) }
+    }
+
+    /// Non-default grants can be deleted outright; the built-in grant is only
+    /// ever revoked, so locally configured agents keep a stable identity.
+    func deleteGrant(id: String) throws {
+        try prepareIfNeeded()
+        guard id != Self.defaultGrantID else { return try revokeGrant(id: id) }
+        try withStatement("DELETE FROM agent_grants WHERE id = ?", values: [.text(id)]) { try stepDone($0) }
+    }
+
+    private func decodeGrant(_ statement: OpaquePointer) -> AgentGrant {
+        AgentGrant(
+            id: columnText(statement, 0) ?? "unknown",
+            displayName: columnText(statement, 1) ?? "Agent",
+            capabilities: decodeList(columnText(statement, 2)).compactMap(AgentCapability.init(rawValue:)),
+            createdAt: dateColumn(statement, 3),
+            lastUsedAt: sqlite3_column_type(statement, 4) == SQLITE_NULL ? nil : dateColumn(statement, 4),
+            revokedAt: sqlite3_column_type(statement, 5) == SQLITE_NULL ? nil : dateColumn(statement, 5),
+            isDefault: sqlite3_column_int64(statement, 6) == 1
+        )
+    }
+
+    private static func generateGrantToken() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
+            throw PersonalContextError.invalid("Could not generate a grant token.")
+        }
+        return Data(bytes).base64EncodedString()
     }
 
     // MARK: - Skill versions, activity, and lifecycle
@@ -1265,7 +1489,8 @@ actor PersonalContextStore {
                 CREATE TABLE IF NOT EXISTS agent_grants(
                     id TEXT PRIMARY KEY, display_name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE,
                     capabilities_json TEXT NOT NULL, allowed_workstream_ids_json TEXT NOT NULL,
-                    created_at REAL NOT NULL, last_used_at REAL, revoked_at REAL
+                    created_at REAL NOT NULL, last_used_at REAL, revoked_at REAL,
+                    is_default INTEGER NOT NULL DEFAULT 0
                 )
                 """,
                 """
@@ -1282,6 +1507,9 @@ actor PersonalContextStore {
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, strftime('%s','now'))",
             ]
             for statement in statements { try execute(statement) }
+            // Added after agent_grants shipped; harmless duplicate-column error
+            // on databases that already have it.
+            try? execute("ALTER TABLE agent_grants ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")

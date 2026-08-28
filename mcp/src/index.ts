@@ -128,12 +128,15 @@ function createServer(): McpServer {
       query: z.string().trim().max(500).optional(),
       workstream_id: z.string().trim().min(1).max(200).optional(),
       application: z.string().trim().min(1).max(100).optional(),
+      actions: z.array(z.string().trim().min(1).max(40)).max(8).optional()
+        .describe("Normalized actions taken so far, in order, such as edit_text or run_tests. Omit to use the latest observed activity."),
       limit: z.number().int().min(1).max(3).default(3),
     }), outputSchema: relevantSkillsOutputSchema, annotations: readOnlyAnnotations,
-  }, async ({ query, workstream_id, application, limit }) => {
+  }, async ({ query, workstream_id, application, actions, limit }) => {
     try {
       const response = await api.get("/v3/skills/relevant", relevantSkillsV3EnvelopeSchema, {
-        q: query, workstream: workstream_id, application, limit,
+        q: query, workstream: workstream_id, application,
+        actions: actions?.length ? actions.join(",") : undefined, limit,
       });
       return toolSuccess({ skills: response.data, trustBoundary });
     } catch (error) { return toolFailure(error); }

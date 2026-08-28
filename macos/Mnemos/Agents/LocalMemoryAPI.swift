@@ -103,13 +103,16 @@ actor LocalMemoryAPI {
             .appendingPathComponent("agent-api.json", isDirectory: false)
     }
 
-    func start() {
+    func start() async {
         guard listener == nil else { return }
         status = .starting
         try? FileManager.default.removeItem(at: configurationURL)
 
         do {
             bearerToken = try Self.generateToken()
+            // The built-in grant is re-keyed to this launch's token, keeping
+            // whatever capabilities the user last chose for it.
+            try await personalStore.refreshDefaultGrant(token: bearerToken)
             guard let endpointPort = NWEndpoint.Port(rawValue: port) else {
                 throw NSError(domain: "MnemosAgentAPI", code: 1, userInfo: [
                     NSLocalizedDescriptionKey: "Invalid local API port."
@@ -261,11 +264,26 @@ actor LocalMemoryAPI {
             return errorResponse(status: 405, reason: "Method Not Allowed", message: "This API is read-only.")
         }
         guard let authorization = request.headers["authorization"],
-              Self.constantTimeEqual(authorization, "Bearer \(bearerToken)") else {
+              authorization.lowercased().hasPrefix("bearer ") else {
+            return errorResponse(status: 401, reason: "Unauthorized", message: "A valid bearer token is required.")
+        }
+        let token = String(authorization.dropFirst("bearer ".count)).trimmingCharacters(in: .whitespaces)
+        guard let grant = try? await personalStore.resolveGrant(token: token) else {
             return errorResponse(status: 401, reason: "Unauthorized", message: "A valid bearer token is required.")
         }
         guard let components = URLComponents(string: "http://127.0.0.1\(request.target)") else {
             return errorResponse(status: 400, reason: "Bad Request", message: "Invalid request target.")
+        }
+        // Evidence is a separate permission from memories and skills, so a
+        // grant can carry derived context without reading captured text.
+        // Endpoints whose whole purpose is one capability are refused outright;
+        // composite responses are filtered further down instead.
+        if let required = Self.requiredCapability(for: components.path, segments: Self.pathSegments(components.path)),
+           !grant.allows(required) {
+            return errorResponse(
+                status: 403, reason: "Forbidden",
+                message: "This agent grant does not include \(required.rawValue) access."
+            )
         }
 
         let path = components.path
@@ -282,7 +300,8 @@ actor LocalMemoryAPI {
             case "/v3/memories/search":
                 let query = try Self.contextQuery(queryItems)
                 let fallback = try await contextStore.search(query)
-                return try jsonResponse(APIEnvelope(data: try await personalStore.search(query, fallback: fallback)))
+                let results = try await personalStore.search(query, fallback: fallback)
+                return try jsonResponse(APIEnvelope(data: Self.filtered(results, for: grant)))
 
             case "/v3/memories/recent":
                 return try jsonResponse(APIEnvelope(data: try await personalStore.recentMemories(
@@ -298,7 +317,8 @@ actor LocalMemoryAPI {
                 let query = Self.optionalContextQuery(queryItems)
                 let fallback = try await contextStore.search(query)
                 let memories = try await personalStore.search(query, fallback: fallback)
-                return try jsonResponse(APIEnvelope(data: try await personalStore.composeContext(query: query.text, memories: memories)))
+                let pack = try await personalStore.composeContext(query: query.text, memories: memories)
+                return try jsonResponse(APIEnvelope(data: Self.filtered(pack, for: grant)))
 
             case "/v3/timeline":
                 guard let from = Self.parseDate(queryItems["from"]),
@@ -311,7 +331,8 @@ actor LocalMemoryAPI {
                     limit: Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 100)
                 )
                 let fallback = try await contextStore.search(query)
-                return try jsonResponse(APIEnvelope(data: try await personalStore.search(query, fallback: fallback)))
+                let timeline = try await personalStore.search(query, fallback: fallback)
+                return try jsonResponse(APIEnvelope(data: Self.filtered(timeline, for: grant)))
 
             case "/v3/skills":
                 // Agents only ever see approved skills. Candidates, rejected,
@@ -323,8 +344,14 @@ actor LocalMemoryAPI {
 
             case "/v3/skills/relevant":
                 let applications = queryItems["application"].map { [$0] } ?? []
+                // An agent may state the steps taken so far; otherwise the
+                // store falls back to the latest observed workflow trace.
+                let actions = queryItems["actions"]
+                    .map { $0.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+                    .map { $0.filter { !$0.isEmpty } }
                 return try jsonResponse(APIEnvelope(data: try await personalStore.relevantSkills(
                     query: queryItems["q"], workstreamID: queryItems["workstream"], applications: applications,
+                    actionPrefix: actions,
                     limit: Self.boundedLimit(queryItems["limit"], defaultValue: 3, maximum: 3)
                 )))
 
@@ -544,6 +571,45 @@ actor LocalMemoryAPI {
             ])
         }
         return Data(bytes).base64EncodedString()
+    }
+
+    private static func pathSegments(_ path: String) -> [String] {
+        path.split(separator: "/").map(String.init)
+    }
+
+    /// The single capability an endpoint exists to serve, or nil when the
+    /// response mixes capabilities and is filtered per grant instead.
+    private static func requiredCapability(for path: String, segments: [String]) -> AgentCapability? {
+        if segments.last == "evidence" { return .evidence }
+        if segments.count >= 2, segments[1] == "skills" { return .skills }
+        switch path {
+        case "/v1/health", "/v2/health", "/v3/health", "/v3/derivation/status":
+            return nil
+        default:
+            return .memories
+        }
+    }
+
+    /// Strips the parts of a composite response the grant may not read, so a
+    /// narrow agent still gets useful context instead of an error.
+    private static func filtered(_ results: [MemorySearchV3Result], for grant: AgentGrant) -> [MemorySearchV3Result] {
+        guard !grant.allows(.evidence) else { return results }
+        return results.map {
+            MemorySearchV3Result(
+                memory: $0.memory, score: $0.score, highlights: $0.highlights,
+                matchReasons: $0.matchReasons, evidencePreviews: []
+            )
+        }
+    }
+
+    private static func filtered(_ pack: PersonalContextPack, for grant: AgentGrant) -> PersonalContextPack {
+        PersonalContextPack(
+            query: pack.query, currentState: pack.currentState,
+            memories: filtered(pack.memories, for: grant),
+            approvedSkills: grant.allows(.skills) ? pack.approvedSkills : [],
+            evidence: grant.allows(.evidence) ? pack.evidence : [],
+            trustBoundary: pack.trustBoundary, generatedAt: pack.generatedAt
+        )
     }
 
     private static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
