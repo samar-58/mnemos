@@ -1,12 +1,10 @@
 import SwiftUI
 
-/// One stretch of work in a single app, rendered as a row on a time rail.
+/// One step of the task, on a time rail: "1:02 — Worked in Xcode on AppModel.swift".
 struct SpanRow: View {
     let span: ActivitySpan
 
-    private var context: String? {
-        span.windowTitle ?? span.anchorKey
-    }
+    @AppStorage(DeveloperDetails.defaultsKey) private var showsDeveloperDetails = false
 
     private var artifact: String? {
         span.url ?? span.documentPath
@@ -35,30 +33,25 @@ struct SpanRow: View {
                     Image(systemName: glyph)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(span.applicationName)
-                        .font(.subheadline.weight(.medium))
+                    Text(Narrative.step(for: span))
+                        .font(.subheadline)
+                        .lineLimit(2)
                     Spacer(minLength: Spacing.s)
                     Text(Elapsed.label(from: span.startedAt, to: span.endedAt))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.tertiary)
                 }
 
-                if let context, !context.isEmpty {
-                    Text(context)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                if let artifact {
+                if showsDeveloperDetails, let artifact {
                     CodeText(text: artifact, lineLimit: 1)
                 }
             }
         }
         .padding(.vertical, Spacing.xs)
+        .help(artifact ?? span.windowTitle ?? span.applicationName)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(span.applicationName), \(span.startedAt.formatted(date: .omitted, time: .shortened)), \(context ?? "no window title")"
+            "\(span.startedAt.formatted(date: .omitted, time: .shortened)), \(Narrative.step(for: span))"
         )
     }
 }

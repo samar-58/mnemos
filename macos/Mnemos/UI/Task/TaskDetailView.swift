@@ -3,6 +3,8 @@ import SwiftUI
 struct TaskDetailView: View {
     let task: TaskMemory
     @EnvironmentObject private var browser: MemoryBrowser
+    @AppStorage(DeveloperDetails.defaultsKey) private var showsDeveloperDetails = false
+    @AppStorage("showsEvidenceInspector") private var showsInspector = false
     @State private var titleDraft = ""
     @FocusState private var titleFocused: Bool
 
@@ -11,13 +13,19 @@ struct TaskDetailView: View {
             Section {
                 header
                     .listRowSeparator(.hidden)
-                summary
+                story
+                    .listRowSeparator(.hidden)
+            }
+            .selectionDisabled()
+
+            Section("Related items") {
+                related
             }
             .selectionDisabled()
 
             Section {
                 if browser.selectedTaskSpans.isEmpty {
-                    Text("No activity recorded for this task.")
+                    Text("Nothing recorded for this task yet.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .selectionDisabled()
@@ -41,8 +49,9 @@ struct TaskDetailView: View {
             }
         }
         .listStyle(.inset)
-        .navigationTitle(task.title)
-        .navigationSubtitle(timeRange)
+        .navigationTitle(Narrative.title(for: task))
+        .navigationSubtitle(Narrative.timeRange(for: task))
+        .safeAreaInset(edge: .bottom, spacing: 0) { footer }
         .onAppear { titleDraft = task.title }
         .onChange(of: task.id) { _, _ in titleDraft = task.title }
         .onChange(of: task.title) { _, newValue in
@@ -85,61 +94,83 @@ struct TaskDetailView: View {
                 .accessibilityLabel(task.isPinned ? "Unpin" : "Pin")
             }
 
-            if !task.digest.isEmpty {
-                Text(task.digest)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
+            Text(Narrative.meta(for: task))
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-            ConfidenceIndicator(confidence: task.groupingConfidence, reasons: task.groupingReasons)
+            if showsDeveloperDetails {
+                ConfidenceIndicator(confidence: task.groupingConfidence, reasons: task.groupingReasons)
+            }
         }
         .padding(.vertical, Spacing.s)
     }
 
+    /// The two questions a person actually opens a memory to answer.
     @ViewBuilder
-    private var summary: some View {
-        DetailRow("When", value: timeRange)
-
-        DetailRow(label: "Workstream") {
-            Menu {
-                Button("None") { browser.assignSelectedTask(toWorkstream: nil) }
-                Divider()
-                ForEach(browser.workstreams) { summary in
-                    Button(summary.workstream.displayName) {
-                        browser.assignSelectedTask(toWorkstream: summary.workstream.id)
-                    }
-                }
-            } label: {
-                Text(task.workstream?.displayName ?? "None")
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+    private var story: some View {
+        StoryBlock(title: "What you were doing") {
+            Text(showsDeveloperDetails ? task.digest : Narrative.summary(for: task))
+                .textSelection(.enabled)
         }
 
-        if let state = task.lastState, !state.isEmpty {
-            DetailRow(label: "Left off at") {
-                Text(state).textSelection(.enabled)
+        if let place = Narrative.lastPlace(for: task) {
+            StoryBlock(title: "Where you left off") {
+                Text(place)
+                    .textSelection(.enabled)
+                    .help(task.lastState ?? place)
             }
         }
+    }
 
-        if !task.applications.isEmpty {
-            DetailRow("Apps", value: task.applications.joined(separator: ", "))
+    @ViewBuilder
+    private var related: some View {
+        ForEach(task.artifacts, id: \.self) { artifact in
+            let item = Narrative.artifact(artifact)
+            Label(item.label, systemImage: Glyph.document)
+                .lineLimit(1)
+                .help(item.detail)
+                .textSelection(.enabled)
+                .accessibilityLabel(item.detail)
         }
 
-        if !task.actions.isEmpty {
-            DetailRow("Actions", value: task.actions.joined(separator: ", "))
-        }
-
-        if !task.artifacts.isEmpty {
-            DetailRow(label: "Files and links") {
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    ForEach(task.artifacts, id: \.self) { artifact in
-                        CodeText(text: artifact, lineLimit: 1)
-                    }
+        Menu {
+            Button("None") { browser.assignSelectedTask(toWorkstream: nil) }
+            Divider()
+            ForEach(browser.workstreams) { summary in
+                Button(summary.workstream.displayName) {
+                    browser.assignSelectedTask(toWorkstream: summary.workstream.id)
                 }
             }
+        } label: {
+            Label(task.workstream?.displayName ?? "No project", systemImage: Glyph.workstream)
         }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Move this task to another project")
+    }
+
+    /// One clear action, and a quiet way to see the raw material behind it.
+    private var footer: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: Spacing.s) {
+                Button("Copy context") {
+                    ContextClipboard.copy(task: task, evidence: browser.selectedTaskEvidence)
+                }
+                .buttonStyle(.borderedProminent)
+                .help("Copy this memory as context for an agent")
+
+                Spacer()
+
+                Button(showsInspector ? "Hide what Mnemos saw" : "Show what Mnemos saw") {
+                    showsInspector.toggle()
+                }
+                .buttonStyle(.link)
+            }
+            .padding(.horizontal, Spacing.l)
+            .padding(.vertical, Spacing.s + 1)
+        }
+        .background(.bar)
     }
 
     @ViewBuilder
@@ -150,7 +181,7 @@ struct TaskDetailView: View {
         }
         Menu("Move to") {
             ForEach(browser.displayedTasks.filter { $0.id != task.id }) { other in
-                Button(other.title) {
+                Button(Narrative.title(for: other)) {
                     ensureSelected(span)
                     browser.moveSelectedSpans(to: other.id)
                 }
@@ -176,12 +207,24 @@ struct TaskDetailView: View {
         guard trimmed != task.title else { return }
         browser.rename(trimmed, taskID: task.id)
     }
+}
 
-    private var timeRange: String {
-        let start = task.startedAt.formatted(date: .abbreviated, time: .shortened)
-        let end = task.endedAt.formatted(date: .omitted, time: .shortened)
-        let duration = Elapsed.label(from: task.startedAt, to: task.endedAt)
-        return task.isOpen ? "\(start) · running for \(Elapsed.label(from: task.startedAt))" : "\(start) – \(end) · \(duration)"
+/// A short heading over a paragraph, used for the conversational blocks.
+private struct StoryBlock<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content
+                .font(.body)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, Spacing.xs)
     }
 }
 
@@ -194,13 +237,13 @@ struct TaskDetailPlaceholder: View {
             ContentUnavailableView {
                 Label("\(selectedCount) tasks selected", systemImage: Glyph.task)
             } description: {
-                Text("Merge them from the Memory menu, or select a single task to inspect it.")
+                Text("Merge them from the Memory menu, or select a single task to see it.")
             }
         } else {
             ContentUnavailableView {
                 Label("No task selected", systemImage: Glyph.task)
             } description: {
-                Text("Choose a task to see what you were doing and the evidence behind it.")
+                Text("Choose a task to see what you were doing and where you left off.")
             }
         }
     }

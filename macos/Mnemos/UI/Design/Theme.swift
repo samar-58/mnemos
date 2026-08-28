@@ -116,8 +116,8 @@ enum EventKindLabel {
 extension EvidenceSource {
     var label: String {
         switch self {
-        case .raw: "Captured"
-        case .compacted: "Summarized"
+        case .raw: "Recorded activity"
+        case .compacted: "Saved context"
         case .userSelected: "Saved by you"
         }
     }

@@ -53,7 +53,7 @@ struct TaskListView: View {
                 ContentUnavailableView {
                     Label("No matches", systemImage: Glyph.search)
                 } description: {
-                    Text("Try fewer words, a wider time range, or a different workstream.")
+                    Text("Try fewer words, a wider time range, or a different project.")
                 } actions: {
                     Button("Clear filters", action: clearFilters)
                 }
@@ -67,6 +67,14 @@ struct TaskListView: View {
 
     private var list: some View {
         List(selection: $browser.selectedTaskIDs) {
+            if let now = browser.nowTask {
+                Section("Now") {
+                    TaskRow(task: now, result: browser.result(for: now.id))
+                        .tag(now.id)
+                        .contextMenu { menu(for: now) }
+                }
+            }
+
             ForEach(browser.days) { day in
                 Section(day.label) {
                     ForEach(day.tasks) { task in
@@ -175,7 +183,7 @@ struct TaskListView: View {
             browser.selectionDidChange()
             browser.renameRequestID = task.id
         }
-        Menu("Workstream") {
+        Menu("Project") {
             Button("None") {
                 browser.selectedTaskIDs = [task.id]
                 browser.selectionDidChange()
@@ -210,7 +218,7 @@ struct TaskListView: View {
         case .recent: "Recent"
         case .today: "Today"
         case .pinned: "Pinned"
-        case let .workstream(id): browser.workstream(id: id)?.displayName ?? "Workstream"
+        case let .workstream(id): browser.workstream(id: id)?.displayName ?? "Project"
         }
     }
 

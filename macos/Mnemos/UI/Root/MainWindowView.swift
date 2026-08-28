@@ -3,7 +3,7 @@ import SwiftUI
 struct MainWindowView: View {
     @EnvironmentObject private var browser: MemoryBrowser
     @Environment(\.openWindow) private var openWindow
-    @AppStorage("showsEvidenceInspector") private var showsInspector = true
+    @AppStorage("showsEvidenceInspector") private var showsInspector = false
 
     var body: some View {
         NavigationSplitView {
@@ -21,9 +21,9 @@ struct MainWindowView: View {
                         Button {
                             showsInspector.toggle()
                         } label: {
-                            Label("Evidence", systemImage: Glyph.inspector)
+                            Label("Sources", systemImage: Glyph.inspector)
                         }
-                        .help(showsInspector ? "Hide evidence" : "Show evidence")
+                        .help(showsInspector ? "Hide sources" : "Show what Mnemos saw")
                     }
                 }
         }

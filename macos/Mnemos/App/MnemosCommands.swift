@@ -4,7 +4,7 @@ import SwiftUI
 /// reachable here, with a shortcut.
 struct MnemosCommands: Commands {
     @ObservedObject var model: AppModel
-    @AppStorage("showsEvidenceInspector") private var showsInspector = true
+    @AppStorage("showsEvidenceInspector") private var showsInspector = false
     @Environment(\.openWindow) private var openWindow
 
     private var browser: MemoryBrowser { model.browser }
@@ -39,6 +39,15 @@ struct MnemosCommands: Commands {
 
             Divider()
 
+            Button("Copy Context") {
+                guard let task = browser.selectedTask else { return }
+                ContextClipboard.copy(task: task, evidence: browser.selectedTaskEvidence)
+            }
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            .disabled(browser.selectedTask == nil)
+
+            Divider()
+
             Button("Merge Selected Tasks") { browser.mergeSelected() }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
                 .disabled(browser.selectedTaskIDs.count < 2)
@@ -62,7 +71,7 @@ struct MnemosCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
-            Button(showsInspector ? "Hide Evidence" : "Show Evidence") {
+            Button(showsInspector ? "Hide Sources" : "Show What Mnemos Saw") {
                 showsInspector.toggle()
             }
             .keyboardShortcut("i", modifiers: [.command, .option])

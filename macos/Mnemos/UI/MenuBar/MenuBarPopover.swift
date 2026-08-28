@@ -158,14 +158,12 @@ private struct TaskSummaryLabel: View {
     var body: some View {
         HStack(spacing: Spacing.s) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(task.title)
+                Text(Narrative.title(for: task))
                     .lineLimit(1)
-                if !task.digest.isEmpty {
-                    Text(task.digest)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
+                Text(Narrative.summary(for: task))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: Spacing.s)
             Text(trailing)

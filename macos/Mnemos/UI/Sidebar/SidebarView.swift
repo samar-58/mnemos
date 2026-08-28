@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @EnvironmentObject private var browser: MemoryBrowser
+    @AppStorage(DeveloperDetails.defaultsKey) private var showsDeveloperDetails = false
 
     private var selection: Binding<SidebarItem?> {
         Binding(
@@ -16,7 +17,7 @@ struct SidebarView: View {
 
     var body: some View {
         List(selection: selection) {
-            Section("Library") {
+            Section {
                 Label("Recent", systemImage: Glyph.recent)
                     .tag(SidebarItem.recent)
                 Label("Today", systemImage: Glyph.today)
@@ -26,11 +27,13 @@ struct SidebarView: View {
             }
 
             if !activeWorkstreams.isEmpty {
-                Section("Workstreams") {
+                Section("Projects") {
                     ForEach(activeWorkstreams) { summary in
                         Label(summary.workstream.displayName, systemImage: summary.workstream.kind.glyph)
                             .badge(summary.taskCount)
-                            .help("\(summary.workstream.kind.label) · \(summary.workstream.canonicalKey)")
+                            .help(showsDeveloperDetails
+                                ? "\(summary.workstream.kind.label) · \(summary.workstream.canonicalKey)"
+                                : summary.workstream.displayName)
                             .tag(SidebarItem.workstream(summary.workstream.id))
                     }
                 }

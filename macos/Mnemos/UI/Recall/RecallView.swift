@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 /// The recall panel's contents: type, pick, open. Deliberately one field and
@@ -154,22 +153,7 @@ struct RecallView: View {
     /// Copies a compact, agent-ready summary of the highlighted task.
     private func copySelected() {
         guard let selected else { return }
-        let task = selected.task
-        var lines = ["# \(task.title)"]
-        lines.append(task.startedAt.formatted(date: .abbreviated, time: .shortened))
-        if !task.digest.isEmpty { lines.append(task.digest) }
-        if let state = task.lastState, !state.isEmpty { lines.append("Left off at: \(state)") }
-        if !task.artifacts.isEmpty {
-            lines.append("Files and links:")
-            lines.append(contentsOf: task.artifacts.prefix(6).map { "- \($0)" })
-        }
-        let excerpts = selected.evidencePreviews.compactMap(\.excerpt).prefix(4)
-        if !excerpts.isEmpty {
-            lines.append("Evidence:")
-            lines.append(contentsOf: excerpts.map { "- \($0)" })
-        }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+        ContextClipboard.copy(task: selected.task, evidence: selected.evidencePreviews)
     }
 }
 
@@ -183,13 +167,13 @@ private struct RecallResultRow: View {
                 .foregroundStyle(result.task.isOpen ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
-                Text(result.task.title)
+                Text(Narrative.title(for: result.task))
                     .font(.headline)
                     .lineLimit(1)
                 if let highlight = result.highlights.first {
                     HighlightedSnippet(snippet: highlight)
-                } else if !result.task.digest.isEmpty {
-                    Text(result.task.digest)
+                } else {
+                    Text(Narrative.summary(for: result.task))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

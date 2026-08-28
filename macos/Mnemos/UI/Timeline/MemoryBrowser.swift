@@ -124,12 +124,21 @@ final class MemoryBrowser: ObservableObject {
         isFiltering ? searchResults.map(\.task) : recentTasks
     }
 
-    /// Tasks grouped into day sections, newest first.
+    /// The task being recorded into right now, shown on its own above the day
+    /// sections. Filtered views keep it inline instead, so a search never hides
+    /// a matching task behind a "Now" heading.
+    var nowTask: TaskMemory? {
+        isFiltering ? nil : displayedTasks.first(where: \.isOpen)
+    }
+
+    /// Tasks grouped into day sections, newest first. Excludes `nowTask`, which
+    /// the list renders separately.
     var days: [TaskDay] {
         let calendar = Calendar.current
+        let nowID = nowTask?.id
         var order: [Date] = []
         var buckets: [Date: [TaskMemory]] = [:]
-        for task in displayedTasks {
+        for task in displayedTasks where task.id != nowID {
             let day = calendar.startOfDay(for: task.endedAt)
             if buckets[day] == nil {
                 buckets[day] = []

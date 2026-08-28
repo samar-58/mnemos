@@ -23,7 +23,7 @@ struct PrivacySettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Keep raw activity for", selection: retention) {
+                Picker("Keep detailed activity for", selection: retention) {
                     Text("7 days").tag(7)
                     Text("30 days").tag(30)
                     Text("90 days").tag(90)
@@ -38,13 +38,13 @@ struct PrivacySettingsView: View {
                 }
 
                 LabeledContent("Stored") {
-                    Text("\(browser.health.taskCount) tasks · \(browser.health.evidenceCount) pieces of evidence")
+                    Text("\(browser.health.taskCount) tasks · \(browser.health.evidenceCount) pieces of context")
                         .foregroundStyle(.secondary)
                 }
             } header: {
                 Text("Storage")
             } footer: {
-                Text("Raw activity expires on this schedule. The task summaries and the evidence kept with them stay, so older work is still searchable.")
+                Text("Detailed activity expires on this schedule. The tasks themselves and the context saved with them stay, so older work is still searchable.")
             }
 
             Section {

@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The provenance side of the app: what Mnemos actually saw, grouped by how it
-/// was kept.
+/// What Mnemos actually saw, grouped by how it was kept. Hidden until asked
+/// for — the rest of the app shows understanding, this shows the raw material.
 struct EvidenceInspector: View {
     @EnvironmentObject private var browser: MemoryBrowser
 
@@ -19,13 +19,13 @@ struct EvidenceInspector: View {
                 ContentUnavailableView {
                     Label("No task selected", systemImage: Glyph.evidence)
                 } description: {
-                    Text("Evidence appears here once you select a task.")
+                    Text("Pick a task to see what Mnemos saw.")
                 }
             } else if browser.selectedTaskEvidence.isEmpty {
                 ContentUnavailableView {
-                    Label("No evidence kept", systemImage: Glyph.evidence)
+                    Label("Nothing kept", systemImage: Glyph.evidence)
                 } description: {
-                    Text("Raw activity for this task may have passed its retention window.")
+                    Text("Mnemos no longer keeps the detailed activity for this task.")
                 }
             } else {
                 List {
@@ -40,12 +40,13 @@ struct EvidenceInspector: View {
                 .listStyle(.inset)
             }
         }
-        .navigationTitle("Evidence")
+        .navigationTitle("What Mnemos saw")
     }
 }
 
 private struct EvidenceRow: View {
     let item: EvidenceItem
+    @AppStorage(DeveloperDetails.defaultsKey) private var showsDeveloperDetails = false
     @State private var showsProvenance = false
 
     private var artifact: String? {
@@ -58,7 +59,9 @@ private struct EvidenceRow: View {
                 Text(item.applicationName)
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
-                Chip(text: EventKindLabel.label(for: item.kind))
+                if showsDeveloperDetails {
+                    Chip(text: EventKindLabel.label(for: item.kind))
+                }
                 Spacer(minLength: Spacing.xs)
                 Text(item.timestamp, format: .dateTime.hour().minute())
                     .font(.caption.monospacedDigit())
@@ -84,21 +87,23 @@ private struct EvidenceRow: View {
                 CodeText(text: artifact, lineLimit: 2)
             }
 
-            DisclosureGroup(isExpanded: $showsProvenance) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Kept as \(item.source.label.lowercased())")
-                    Text("Redaction rules v\(item.redactionPolicyVersion)")
-                    if let observationID = item.observationID {
-                        Text(observationID).textSelection(.enabled)
+            if showsDeveloperDetails {
+                DisclosureGroup(isExpanded: $showsProvenance) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Kept as \(item.source.label.lowercased())")
+                        Text("Redaction rules v\(item.redactionPolicyVersion)")
+                        if let observationID = item.observationID {
+                            Text(observationID).textSelection(.enabled)
+                        }
                     }
-                }
-                .font(.caption2.monospaced())
-                .foregroundStyle(.tertiary)
-                .padding(.top, 2)
-            } label: {
-                Text("Where this came from")
-                    .font(.caption2)
+                    .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+                } label: {
+                    Text("Where this came from")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
         .padding(.vertical, Spacing.xs)

@@ -1,15 +1,12 @@
 import SwiftUI
 
+/// A memory as a card: what you did, told in three lines. Counts and confidence
+/// live behind developer details.
 struct TaskRow: View {
     let task: TaskMemory
     let result: ContextSearchResult?
 
-    private var applicationSummary: String? {
-        guard !task.applications.isEmpty else { return nil }
-        let names = task.applications.prefix(2).joined(separator: ", ")
-        let remainder = task.applications.count - 2
-        return remainder > 0 ? "\(names) +\(remainder)" : names
-    }
+    @AppStorage(DeveloperDetails.defaultsKey) private var showsDeveloperDetails = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
@@ -20,7 +17,7 @@ struct TaskRow: View {
                         .foregroundStyle(.tint)
                         .accessibilityLabel("Pinned")
                 }
-                Text(task.title)
+                Text(Narrative.title(for: task))
                     .font(.headline)
                     .lineLimit(1)
                 if task.isOpen {
@@ -32,24 +29,22 @@ struct TaskRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            if !task.digest.isEmpty {
-                Text(task.digest)
+            if let highlight = result?.highlights.first {
+                HighlightedSnippet(snippet: highlight)
+            } else {
+                Text(Narrative.summary(for: task))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
 
-            if let highlight = result?.highlights.first {
-                HighlightedSnippet(snippet: highlight)
-            }
-
             HStack(spacing: Spacing.m) {
-                if let applicationSummary {
-                    MetaLabel(text: applicationSummary, symbol: Glyph.application)
-                }
-                MetaLabel(text: "\(task.eventCount)", symbol: Glyph.evidence)
-                if let workstream = task.workstream {
-                    MetaLabel(text: workstream.displayName, symbol: Glyph.workstream)
+                Text(Narrative.meta(for: task))
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                if showsDeveloperDetails {
+                    MetaLabel(text: "\(task.eventCount)", symbol: Glyph.evidence)
                 }
                 Spacer(minLength: 0)
             }
@@ -60,10 +55,10 @@ struct TaskRow: View {
     }
 
     private var accessibilityDescription: String {
-        var parts = [task.title]
+        var parts = [Narrative.title(for: task)]
         if task.isPinned { parts.append("pinned") }
         if task.isOpen { parts.append("in progress") }
-        parts.append(task.digest)
+        parts.append(Narrative.summary(for: task))
         parts.append(task.endedAt.formatted(date: .abbreviated, time: .shortened))
         return parts.filter { !$0.isEmpty }.joined(separator: ", ")
     }

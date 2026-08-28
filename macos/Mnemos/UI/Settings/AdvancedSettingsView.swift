@@ -4,9 +4,18 @@ struct AdvancedSettingsView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var browser: MemoryBrowser
     @Environment(\.openWindow) private var openWindow
+    @AppStorage(DeveloperDetails.defaultsKey) private var showsDeveloperDetails = false
 
     var body: some View {
         Form {
+            Section {
+                Toggle("Show developer details", isOn: $showsDeveloperDetails)
+            } header: {
+                Text("Developer")
+            } footer: {
+                Text("Puts event counts, grouping confidence, raw event kinds, file paths, and where each piece of context came from back into the main window. Off by default — the app normally shows what you were doing, not how it was recorded.")
+            }
+
             Section {
                 if model.dogfoodRiskAccepted {
                     Label("Acknowledged on this Mac", systemImage: "checkmark.circle.fill")
