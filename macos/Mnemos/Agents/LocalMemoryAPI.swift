@@ -51,6 +51,22 @@ actor LocalMemoryAPI {
         let data: Value
     }
 
+    private struct V3MemoryDetail: Encodable {
+        let memory: DerivedMemory
+        let claims: [MemoryClaim]
+    }
+
+    private struct V3SkillDetail: Encodable {
+        let skill: PersonalSkill
+        let version: SkillVersion
+    }
+
+    private struct V3TaskDetail: Encodable {
+        let task: TaskContext
+        let memory: DerivedMemory?
+        let claims: [MemoryClaim]
+    }
+
     private struct Request {
         let method: String
         let target: String
@@ -65,6 +81,7 @@ actor LocalMemoryAPI {
 
     private let memoryStore: SQLiteMemoryStore
     private let contextStore: ContextEngineStore
+    private let personalStore: PersonalContextStore
     private let queue = DispatchQueue(label: "dev.mnemos.agent-api", qos: .userInitiated)
     private let port: UInt16 = 17_373
     private let maximumRequestBytes = 32 * 1_024
@@ -73,9 +90,10 @@ actor LocalMemoryAPI {
     private var bearerToken = ""
     private var status: AgentAPIStatus = .stopped
 
-    init(memoryStore: SQLiteMemoryStore, contextStore: ContextEngineStore) {
+    init(memoryStore: SQLiteMemoryStore, contextStore: ContextEngineStore, personalStore: PersonalContextStore) {
         self.memoryStore = memoryStore
         self.contextStore = contextStore
+        self.personalStore = personalStore
         let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -258,6 +276,58 @@ actor LocalMemoryAPI {
 
         do {
             switch path {
+            case "/v3/health", "/v3/derivation/status":
+                return try jsonResponse(APIEnvelope(data: try await personalStore.derivationStatus()))
+
+            case "/v3/memories/search":
+                let query = try Self.contextQuery(queryItems)
+                let fallback = try await contextStore.search(query)
+                return try jsonResponse(APIEnvelope(data: try await personalStore.search(query, fallback: fallback)))
+
+            case "/v3/memories/recent":
+                return try jsonResponse(APIEnvelope(data: try await personalStore.recentMemories(
+                    limit: Self.boundedLimit(queryItems["limit"], defaultValue: 10, maximum: 50)
+                )))
+
+            case "/v3/patterns":
+                return try jsonResponse(APIEnvelope(data: try await personalStore.patterns(
+                    limit: Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 200)
+                )))
+
+            case "/v3/context/current":
+                let query = Self.optionalContextQuery(queryItems)
+                let fallback = try await contextStore.search(query)
+                let memories = try await personalStore.search(query, fallback: fallback)
+                return try jsonResponse(APIEnvelope(data: try await personalStore.composeContext(query: query.text, memories: memories)))
+
+            case "/v3/timeline":
+                guard let from = Self.parseDate(queryItems["from"]),
+                      let to = Self.parseDate(queryItems["to"]), from <= to else {
+                    return errorResponse(status: 400, reason: "Bad Request", message: "Valid RFC3339 from and to parameters are required.")
+                }
+                let query = MemoryQuery(
+                    text: nil, from: from, to: to, application: queryItems["application"],
+                    workstream: queryItems["workstream"], pinnedOnly: false,
+                    limit: Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 100)
+                )
+                let fallback = try await contextStore.search(query)
+                return try jsonResponse(APIEnvelope(data: try await personalStore.search(query, fallback: fallback)))
+
+            case "/v3/skills":
+                // Agents only ever see approved skills. Candidates, rejected,
+                // and retired skills stay inside the app.
+                return try jsonResponse(APIEnvelope(data: try await personalStore.skills(
+                    status: .approved,
+                    limit: Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 200)
+                )))
+
+            case "/v3/skills/relevant":
+                let applications = queryItems["application"].map { [$0] } ?? []
+                return try jsonResponse(APIEnvelope(data: try await personalStore.relevantSkills(
+                    query: queryItems["q"], workstreamID: queryItems["workstream"], applications: applications,
+                    limit: Self.boundedLimit(queryItems["limit"], defaultValue: 3, maximum: 3)
+                )))
+
             case "/v2/health":
                 return try jsonResponse(APIEnvelope(data: await contextStore.health()))
 
@@ -316,6 +386,48 @@ actor LocalMemoryAPI {
 
             default:
                 let segments = path.split(separator: "/").map(String.init)
+                if segments.count >= 3, segments[0] == "v3", segments[1] == "memories",
+                   let memoryID = segments[2].removingPercentEncoding, !memoryID.isEmpty {
+                    guard let memory = try await personalStore.memory(id: memoryID) else {
+                        return errorResponse(status: 404, reason: "Not Found", message: "Memory not found.")
+                    }
+                    if segments.count == 3 {
+                        let claims = try await personalStore.claims(for: memory.versionID)
+                        return try jsonResponse(APIEnvelope(data: V3MemoryDetail(memory: memory, claims: claims)))
+                    }
+                    if segments.count == 4, segments[3] == "evidence", memory.scope == .episode {
+                        let limit = Self.boundedLimit(queryItems["limit"], defaultValue: 50, maximum: 200)
+                        return try jsonResponse(APIEnvelope(data: try await contextStore.evidence(for: memory.scopeID, limit: limit)))
+                    }
+                    return errorResponse(status: 404, reason: "Not Found", message: "Unknown V3 memory endpoint.")
+                }
+                if segments.count == 4, segments[0] == "v3", segments[1] == "workstreams", segments[3] == "state",
+                   let workstreamID = segments[2].removingPercentEncoding {
+                    guard let state = try await personalStore.workstreamState(id: workstreamID) else {
+                        return errorResponse(status: 404, reason: "Not Found", message: "Workstream state not found.")
+                    }
+                    return try jsonResponse(APIEnvelope(data: state))
+                }
+                if segments.count == 3, segments[0] == "v3", segments[1] == "tasks",
+                   let taskID = segments[2].removingPercentEncoding,
+                   let context = try await contextStore.context(for: taskID) {
+                    let memory = try await personalStore.memory(forTaskID: taskID)
+                    let claims: [MemoryClaim]
+                    if let memory {
+                        claims = try await personalStore.claims(for: memory.versionID)
+                    } else {
+                        claims = []
+                    }
+                    return try jsonResponse(APIEnvelope(data: V3TaskDetail(task: context, memory: memory, claims: claims)))
+                }
+                if segments.count == 3, segments[0] == "v3", segments[1] == "skills",
+                   let skillID = segments[2].removingPercentEncoding {
+                    guard let pair = try await personalStore.skill(id: skillID), pair.0.status == .approved else {
+                        return errorResponse(status: 404, reason: "Not Found", message: "Skill not found.")
+                    }
+                    try? await personalStore.recordSkillRetrieval(skillIDs: [pair.0.id])
+                    return try jsonResponse(APIEnvelope(data: V3SkillDetail(skill: pair.0, version: pair.1)))
+                }
                 if segments.count >= 3, segments[0] == "v2", segments[1] == "tasks",
                    let taskID = segments[2].removingPercentEncoding, !taskID.isEmpty {
                     if segments.count == 3 {
@@ -476,6 +588,16 @@ actor LocalMemoryAPI {
             workstream: items["workstream"],
             pinnedOnly: items["pinned"] == "true",
             limit: boundedLimit(items["limit"], defaultValue: 10, maximum: 50)
+        )
+    }
+
+    private static func optionalContextQuery(_ items: [String: String]) -> MemoryQuery {
+        MemoryQuery(
+            text: items["q"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+            from: items["from"].flatMap(parseDate), to: items["to"].flatMap(parseDate),
+            application: items["application"], workstream: items["workstream"],
+            pinnedOnly: items["pinned"] == "true",
+            limit: boundedLimit(items["limit"], defaultValue: 8, maximum: 20)
         )
     }
 

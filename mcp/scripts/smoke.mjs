@@ -18,7 +18,9 @@ try {
   const listed = await client.listTools();
   const names = listed.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
-    "get_episode", "get_evidence", "get_timeline", "recall_context", "recent_activity", "search_memory",
+    "get_current_context", "get_episode", "get_evidence", "get_project_state",
+    "get_relevant_skills", "get_skill", "get_timeline", "recall_context",
+    "recent_activity", "search_memory",
   ]);
   assert.ok(listed.tools.every((tool) => tool.annotations?.readOnlyHint === true));
 

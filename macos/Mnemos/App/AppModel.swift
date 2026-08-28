@@ -39,15 +39,26 @@ final class AppModel: ObservableObject {
     @Published private(set) var agentAccessEnabled: Bool
     @Published private(set) var agentAPIStatus: AgentAPIStatus = .stopped
     @Published private(set) var agentConfigurationPath = ""
+    @Published private(set) var derivationStatus: DerivationStatus?
+    @Published private(set) var codexAccountStatus = CodexAccountStatus(signedIn: false, planType: nil)
+    @Published private(set) var intelligenceMessage: String?
+    @Published private(set) var cloudAllowedBundleIDs: Set<String>
+    @Published private(set) var cloudAllowedDomains: Set<String>
+    @Published private(set) var workflowPatterns: [WorkflowPattern] = []
+    @Published private(set) var personalSkills: [PersonalSkill] = []
+    @Published private(set) var skillActivity: [String: SkillActivity] = [:]
     /// Which tab the Settings window should show when it is opened from code.
     @Published var settingsTab: SettingsTab = .general
 
     let browser: MemoryBrowser
+    let personalContextStore: PersonalContextStore
     let launchedAt = Date.now
 
     private let captureService = AccessibilityCaptureService()
     private let memoryStore: SQLiteMemoryStore
     private let contextStore: ContextEngineStore
+    private let codexProvider: CodexAppServerProvider
+    private let derivationCoordinator: DerivationCoordinator
     private let agentAPI: LocalMemoryAPI
     private var monitorTask: Task<Void, Never>?
     private var persistenceTask: Task<Void, Never>?
@@ -62,10 +73,15 @@ final class AppModel: ObservableObject {
     init() {
         let memoryStore = SQLiteMemoryStore()
         let contextStore = ContextEngineStore()
+        let personalStore = PersonalContextStore()
+        let codexProvider = CodexAppServerProvider()
         self.memoryStore = memoryStore
         self.contextStore = contextStore
+        self.personalContextStore = personalStore
+        self.codexProvider = codexProvider
+        self.derivationCoordinator = DerivationCoordinator(store: personalStore, provider: codexProvider)
         browser = MemoryBrowser(store: contextStore)
-        agentAPI = LocalMemoryAPI(memoryStore: memoryStore, contextStore: contextStore)
+        agentAPI = LocalMemoryAPI(memoryStore: memoryStore, contextStore: contextStore, personalStore: personalStore)
         allowedBundleIDs = Set(UserDefaults.standard.stringArray(forKey: Self.allowedApplicationsKey) ?? [])
         allowedDomains = Set(
             (UserDefaults.standard.stringArray(forKey: Self.allowedDomainsKey) ?? [])
@@ -81,6 +97,8 @@ final class AppModel: ObservableObject {
         dogfoodRiskAccepted = UserDefaults.standard.bool(forKey: Self.dogfoodRiskAcceptedKey)
         customRedactionLiterals = UserDefaults.standard.stringArray(forKey: CapturePrivacy.customLiteralDefaultsKey) ?? []
         customRedactionRegexes = UserDefaults.standard.stringArray(forKey: CapturePrivacy.customRegexDefaultsKey) ?? []
+        cloudAllowedBundleIDs = Set(UserDefaults.standard.stringArray(forKey: PersonalContextStore.cloudApplicationDefaultsKey) ?? [])
+        cloudAllowedDomains = Set(UserDefaults.standard.stringArray(forKey: PersonalContextStore.cloudDomainDefaultsKey) ?? [])
         refreshAvailableApplications()
         if !accessibilityTrusted { status = .permissionRequired }
         prepareMemoryStores()
@@ -93,6 +111,8 @@ final class AppModel: ObservableObject {
                 await agentAPI.stop()
             }
             refreshAgentAPIStatus()
+            await refreshIntelligenceStatus()
+            await derivationCoordinator.runDueJobs()
         }
 
         monitorTask = Task { [weak self] in
@@ -182,6 +202,8 @@ final class AppModel: ObservableObject {
             allowedBundleIDs.insert(application.bundleID)
         } else {
             allowedBundleIDs.remove(application.bundleID)
+            cloudAllowedBundleIDs.remove(application.bundleID)
+            saveCloudSources()
         }
         UserDefaults.standard.set(Array(allowedBundleIDs).sorted(), forKey: Self.allowedApplicationsKey)
         captureService.updatePolicy(allowedBundleIDs: allowedBundleIDs, allowedDomains: allowedDomains)
@@ -202,6 +224,8 @@ final class AppModel: ObservableObject {
 
     func removeAllowedDomain(_ domain: String) {
         allowedDomains.remove(domain)
+        cloudAllowedDomains.remove(domain)
+        saveCloudSources()
         saveAllowedDomains()
         captureService.updatePolicy(allowedBundleIDs: allowedBundleIDs, allowedDomains: allowedDomains)
         if allowedDomains.isEmpty {
@@ -282,6 +306,183 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - Intelligence
+
+    var cloudEnrichmentEnabled: Bool {
+        UserDefaults.standard.bool(forKey: PersonalContextStore.cloudEnabledDefaultsKey)
+    }
+
+    func setCloudEnrichmentEnabled(_ enabled: Bool) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await personalContextStore.setCloudEnrichmentEnabled(enabled)
+                intelligenceMessage = enabled
+                    ? "Cloud enrichment enabled for explicitly allowed sources."
+                    : "Cloud enrichment is off. Deterministic local memory remains available."
+                await refreshIntelligenceStatus()
+            } catch {
+                intelligenceMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func setCloudApplication(_ bundleID: String, allowed: Bool) {
+        guard allowedBundleIDs.contains(bundleID) else { return }
+        if allowed { cloudAllowedBundleIDs.insert(bundleID) }
+        else { cloudAllowedBundleIDs.remove(bundleID) }
+        saveCloudSources()
+    }
+
+    func setCloudDomain(_ domain: String, allowed: Bool) {
+        guard allowedDomains.contains(domain) else { return }
+        if allowed { cloudAllowedDomains.insert(domain) }
+        else { cloudAllowedDomains.remove(domain) }
+        saveCloudSources()
+    }
+
+    func connectCodex() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let login = try await codexProvider.beginLogin()
+                NSWorkspace.shared.open(login.authorizationURL)
+                intelligenceMessage = "Finish signing in to Codex in your browser, then return to Mnemos."
+            } catch {
+                intelligenceMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func refreshIntelligenceStatus() async {
+        derivationStatus = try? await personalContextStore.derivationStatus()
+        if let account = try? await codexProvider.accountStatus() { codexAccountStatus = account }
+    }
+
+    func runDerivationNow() {
+        Task { [weak self] in
+            guard let self else { return }
+            intelligenceMessage = "Processing due memory windows…"
+            await derivationCoordinator.runNow()
+            await refreshIntelligenceStatus()
+            await refreshPersonalInsights()
+            intelligenceMessage = "Memory processing is up to date."
+        }
+    }
+
+    func refreshPersonalInsights() async {
+        workflowPatterns = (try? await personalContextStore.patterns(limit: 100)) ?? []
+        personalSkills = (try? await personalContextStore.skills(limit: 100)) ?? []
+        var activity: [String: SkillActivity] = [:]
+        for skill in personalSkills {
+            activity[skill.id] = (try? await personalContextStore.skillActivity(skillID: skill.id))
+                ?? .empty(skillID: skill.id)
+        }
+        skillActivity = activity
+    }
+
+    /// Resolves the derived memories behind a pattern's occurrences, so a
+    /// suggestion can always be traced back to the work that produced it.
+    func supportingMemories(taskIDs: [String]) async -> [DerivedMemory] {
+        var memories: [DerivedMemory] = []
+        for taskID in taskIDs.prefix(12) {
+            if let memory = try? await personalContextStore.memory(forTaskID: taskID) {
+                memories.append(memory)
+            }
+        }
+        return memories
+    }
+
+    /// Loads the full record behind one skill: its current version plus every
+    /// earlier version, so the detail view can show history and rollback.
+    func skillDetail(_ id: String) async -> (skill: PersonalSkill, version: SkillVersion, history: [SkillVersion])? {
+        guard let pair = try? await personalContextStore.skill(id: id) else { return nil }
+        let history = (try? await personalContextStore.skillVersions(skillID: id)) ?? []
+        return (pair.0, pair.1, history)
+    }
+
+    func approveSkill(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await personalContextStore.approveSkill(id: id)
+                await refreshPersonalInsights()
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    func rejectSkill(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await personalContextStore.rejectSkill(id: id)
+                await refreshPersonalInsights()
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    func exportSkill(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let pair = try await personalContextStore.skill(id: id) else {
+                    throw NativeSkillExportError.notApproved
+                }
+                let url = try NativeSkillExporter.export(skill: pair.0, version: pair.1)
+                try await personalContextStore.recordSkillExport(
+                    skillID: id, versionID: pair.1.id, versionNumber: pair.1.version
+                )
+                await refreshPersonalInsights()
+                intelligenceMessage = "Exported to \(url.path)"
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    func removeSkillExport(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                guard let pair = try await personalContextStore.skill(id: id) else {
+                    throw NativeSkillExportError.notApproved
+                }
+                let removed = try NativeSkillExporter.removeExport(skill: pair.0)
+                try await personalContextStore.recordSkillExportRemoved(skillID: id)
+                await refreshPersonalInsights()
+                intelligenceMessage = removed
+                    ? "Removed the exported skill package."
+                    : "No exported package was present; Mnemos cleared its record."
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    /// Withdraws an approved skill. Any exported package is removed too, so a
+    /// retired skill cannot keep instructing agents from disk.
+    func retireSkill(_ id: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                if let pair = try await personalContextStore.skill(id: id),
+                   try NativeSkillExporter.removeExport(skill: pair.0) {
+                    try await personalContextStore.recordSkillExportRemoved(skillID: id)
+                }
+                try await personalContextStore.retireSkill(id: id)
+                await refreshPersonalInsights()
+                intelligenceMessage = "Retired. Agents no longer receive this skill."
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
+    func rollbackSkill(_ id: String, to versionID: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await personalContextStore.rollbackSkill(id: id, toVersionID: versionID)
+                await refreshPersonalInsights()
+                intelligenceMessage = "Restored the earlier approved version."
+            } catch { intelligenceMessage = error.localizedDescription }
+        }
+    }
+
     // MARK: - Windows
 
     /// Opens the Settings window on a specific tab.
@@ -318,6 +519,9 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             memoryHealth = await memoryStore.health()
+            try? await contextStore.prepare()
+            try? await personalContextStore.prepare()
+            await refreshPersonalInsights()
             browser.refresh()
         }
     }
@@ -338,6 +542,13 @@ final class AppModel: ObservableObject {
 
         tickCount += 1
         if tickCount.isMultiple(of: 5) { refreshAvailableApplications() }
+        if tickCount.isMultiple(of: 60) {
+            Task { [weak self] in
+                guard let self else { return }
+                await derivationCoordinator.runDueJobs()
+                await refreshIntelligenceStatus()
+            }
+        }
         refreshAgentAPIStatus()
     }
 
@@ -364,6 +575,7 @@ final class AppModel: ObservableObject {
             do {
                 try await memoryStore.record(event)
                 try await contextStore.record(event)
+                try await personalContextStore.captureDidPersist()
                 browser.recordingRecovered()
                 persistedSinceRefresh += 1
                 if persistedSinceRefresh >= 5 {
@@ -384,6 +596,16 @@ final class AppModel: ObservableObject {
 
     private func saveAllowedDomains() {
         UserDefaults.standard.set(Array(allowedDomains).sorted(), forKey: Self.allowedDomainsKey)
+    }
+
+    private func saveCloudSources() {
+        let bundles = cloudAllowedBundleIDs.intersection(allowedBundleIDs)
+        let domains = cloudAllowedDomains.intersection(allowedDomains)
+        cloudAllowedBundleIDs = bundles
+        cloudAllowedDomains = domains
+        Task { [personalContextStore] in
+            await personalContextStore.setCloudSources(bundleIDs: bundles, domains: domains)
+        }
     }
 
     private func saveCustomRedactionRules() {

@@ -40,12 +40,19 @@ struct TaskListView: View {
             } message: { _ in
                 Text("The recorded activity behind this task is deleted too. This can't be undone.")
             }
-            .onAppear { browser.refresh() }
+            .onAppear {
+                browser.refresh()
+                Task { await model.refreshPersonalInsights() }
+            }
     }
 
     @ViewBuilder
     private var content: some View {
-        if browser.displayedTasks.isEmpty {
+        if browser.sidebarSelection == .patterns {
+            patterns
+        } else if browser.sidebarSelection == .skills {
+            skills
+        } else if browser.displayedTasks.isEmpty {
             if browser.isSearching {
                 ProgressView().controlSize(.small)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -62,6 +69,73 @@ struct TaskListView: View {
             }
         } else {
             list
+        }
+    }
+
+    private var patterns: some View {
+        List(model.workflowPatterns, selection: $browser.selectedPatternID) { pattern in
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack {
+                    Text(pattern.title).font(.headline)
+                    Spacer()
+                    Text("\(Int(pattern.confidence * 100))%")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Text(pattern.summary)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Text("\(pattern.occurrenceCount) occurrences · \(pattern.status.rawValue.capitalized)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, Spacing.xs)
+            .tag(pattern.id)
+        }
+        .listStyle(.inset)
+        .overlay {
+            if model.workflowPatterns.isEmpty {
+                ContentUnavailableView(
+                    "No reliable patterns yet", systemImage: "point.3.filled.connected.trianglepath.dotted",
+                    description: Text("A workflow needs at least three similar occurrences across two days before Mnemos suggests it.")
+                )
+            }
+        }
+    }
+
+    private var skills: some View {
+        List(model.personalSkills, selection: $browser.selectedSkillID) { skill in
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                HStack(spacing: Spacing.s) {
+                    Text(skill.title).font(.headline)
+                    Spacer()
+                    SkillStatusChip(status: skill.status)
+                }
+                Text(skill.description)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                HStack(spacing: Spacing.xs) {
+                    Text("\(skill.occurrenceCount) workflows · \(Int(skill.confidence * 100))% confidence")
+                    if model.skillActivity[skill.id]?.isExported == true {
+                        Text("· Exported")
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            }
+            .padding(.vertical, Spacing.xs)
+            .tag(skill.id)
+        }
+        .listStyle(.inset)
+        .overlay {
+            if model.personalSkills.isEmpty {
+                ContentUnavailableView(
+                    "No skill candidates yet", systemImage: "wand.and.stars",
+                    description: Text("Mnemos only proposes skills after local pattern mining finds repeated behavior. Nothing is trusted by agents until you approve it.")
+                )
+            }
         }
     }
 
@@ -218,11 +292,19 @@ struct TaskListView: View {
         case .recent: "Recent"
         case .today: "Today"
         case .pinned: "Pinned"
+        case .patterns: "Patterns"
+        case .skills: "Skills"
         case let .workstream(id): browser.workstream(id: id)?.displayName ?? "Project"
         }
     }
 
     private var subtitle: String {
+        if browser.sidebarSelection == .patterns {
+            return "\(model.workflowPatterns.count) statistically supported"
+        }
+        if browser.sidebarSelection == .skills {
+            return "\(model.personalSkills.count) candidates and approved skills"
+        }
         let count = browser.displayedTasks.count
         let noun = count == 1 ? "task" : "tasks"
         if browser.isFiltering, !browser.searchText.isEmpty {

@@ -4,6 +4,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case capture
     case privacy
+    case intelligence
     case agents
     case advanced
 
@@ -14,6 +15,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: "General"
         case .capture: "Capture"
         case .privacy: "Privacy"
+        case .intelligence: "Intelligence"
         case .agents: "Agents"
         case .advanced: "Advanced"
         }
@@ -24,6 +26,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .general: Glyph.general
         case .capture: Glyph.capture
         case .privacy: Glyph.privacy
+        case .intelligence: Glyph.intelligence
         case .agents: Glyph.agents
         case .advanced: Glyph.advanced
         }
@@ -50,6 +53,7 @@ struct SettingsView: View {
         case .general: GeneralSettingsView()
         case .capture: CaptureSettingsView()
         case .privacy: PrivacySettingsView()
+        case .intelligence: IntelligenceSettingsView()
         case .agents: AgentsSettingsView()
         case .advanced: AdvancedSettingsView()
         }

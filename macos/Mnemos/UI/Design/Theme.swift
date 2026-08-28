@@ -33,6 +33,7 @@ enum Glyph {
     static let search = "magnifyingglass"
     static let inspector = "sidebar.trailing"
     static let agents = "cpu"
+    static let intelligence = "sparkles"
     static let privacy = "hand.raised"
     static let capture = "dot.radiowaves.left.and.right"
     static let storage = "internaldrive"

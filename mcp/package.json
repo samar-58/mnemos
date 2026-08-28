@@ -1,6 +1,6 @@
 {
   "name": "@mnemos/mcp-server",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Read-only stdio MCP adapter for the Mnemos macOS memory service",
   "type": "module",

@@ -20,6 +20,10 @@ actor AppleSentenceEmbeddingProvider {
     static let providerID = "apple.nl-sentence"
 
     func embed(_ value: String) -> SemanticVector? {
+        Self.makeEmbedding(value)
+    }
+
+    nonisolated static func makeEmbedding(_ value: String) -> SemanticVector? {
         let text = String(value.prefix(8_000))
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
@@ -43,7 +47,7 @@ actor AppleSentenceEmbeddingProvider {
         vDSP_vsdiv(values, 1, &divisor, &values, 1, vDSP_Length(values.count))
 
         return SemanticVector(
-            provider: Self.providerID,
+            provider: providerID,
             language: language.rawValue,
             revision: revision,
             dimension: embedding.dimension,

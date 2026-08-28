@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mnemos Context"
+  short_description: "Recall local project context and approved workflows"
+  default_prompt: "Use $mnemos-context to recover the relevant context for this task."

@@ -78,6 +78,94 @@ export const evidenceOutputSchema = z.object({
 export const recallContextOutputSchema = z.object({ context: contextPackSchema, trustBoundary: z.string() });
 export const timelineOutputSchema = z.object({ entries: z.array(timelineEntrySchema), trustBoundary: z.string() });
 
+// V3 keeps generated memories and approved instructions structurally separate
+// from captured evidence. These schemas deliberately mirror the Swift public
+// models so malformed local API output fails closed at the MCP boundary.
+export const resumeStateSchema = z.object({
+  kind: z.enum(["document", "webpage", "terminal", "selection", "text", "window"]),
+  value: z.string(), application: z.string(), timestamp: z.iso.datetime(),
+  supportingEvidenceID: z.string().optional(),
+});
+
+export const derivedMemorySchema = z.object({
+  id: z.string().min(1), versionID: z.string().min(1), version: z.number().int().positive(),
+  scope: z.enum(["episode", "daily_workstream", "daily_recap"]), scopeID: z.string().min(1),
+  workstream: workstreamSchema.optional(), startedAt: z.iso.datetime(), endedAt: z.iso.datetime(),
+  title: z.string(), summary: z.string(),
+  progress: z.enum(["in_progress", "completed", "blocked", "unknown"]),
+  accomplishments: z.array(z.string()), blockers: z.array(z.string()), openLoops: z.array(z.string()),
+  artifacts: z.array(z.string()), applications: z.array(z.string()), resumeState: resumeStateSchema.optional(),
+  status: z.enum(["pending_enrichment", "current", "local_only", "failed", "superseded"]),
+  authorship: z.enum(["deterministic", "model_derived", "user_authored"]),
+  sourceCoverage: z.number().min(0).max(1), omittedSourceCount: z.number().int().nonnegative(),
+  provider: z.string().optional(), model: z.string().optional(), createdAt: z.iso.datetime(), isUserLocked: z.boolean(),
+});
+
+export const memoryClaimSchema = z.object({
+  id: z.string().min(1), memoryVersionID: z.string().min(1), kind: z.string(), text: z.string(),
+  confidence: z.number().min(0).max(1), evidenceIDs: z.array(z.string()),
+});
+
+export const memorySearchV3ResultSchema = z.object({
+  memory: derivedMemorySchema, score: z.number().nonnegative(), highlights: z.array(z.string()),
+  matchReasons: z.array(z.string()), evidencePreviews: z.array(evidenceItemSchema),
+});
+
+export const workstreamStateSchema = z.object({
+  id: z.string().min(1), workstream: workstreamSchema, summary: z.string(), decisions: z.array(z.string()),
+  blockers: z.array(z.string()), openLoops: z.array(z.string()), artifacts: z.array(z.string()),
+  lastMemoryID: z.string().optional(), updatedAt: z.iso.datetime(),
+});
+
+export const personalSkillSchema = z.object({
+  id: z.string().min(1), currentVersionID: z.string().optional(), title: z.string(), description: z.string(),
+  scopeWorkstreamID: z.string().optional(), status: z.enum(["candidate", "approved", "rejected", "retired"]),
+  confidence: z.number().min(0).max(1), occurrenceCount: z.number().int().nonnegative(), updatedAt: z.iso.datetime(),
+});
+
+export const skillVersionSchema = z.object({
+  id: z.string().min(1), skillID: z.string().min(1), version: z.number().int().positive(), trigger: z.string(),
+  workflow: z.array(z.string()), preferences: z.array(z.string()), constraints: z.array(z.string()),
+  verification: z.array(z.string()), evidenceMemoryIDs: z.array(z.string()),
+  approvedAt: z.iso.datetime().optional(), createdAt: z.iso.datetime(),
+});
+
+export const relevantSkillSchema = z.object({
+  skill: personalSkillSchema, version: skillVersionSchema, score: z.number().min(0).max(1),
+  matchReasons: z.array(z.string()),
+});
+
+export const personalContextPackSchema = z.object({
+  query: z.string().optional(), currentState: z.array(workstreamStateSchema),
+  memories: z.array(memorySearchV3ResultSchema), approvedSkills: z.array(relevantSkillSchema),
+  evidence: z.array(evidenceItemSchema), trustBoundary: z.string(), generatedAt: z.iso.datetime(),
+});
+
+export const memoryV3DetailSchema = z.object({ memory: derivedMemorySchema, claims: z.array(memoryClaimSchema) });
+export const taskV3DetailSchema = z.object({
+  task: taskContextSchema, memory: derivedMemorySchema.optional(), claims: z.array(memoryClaimSchema),
+});
+export const skillV3DetailSchema = z.object({ skill: personalSkillSchema, version: skillVersionSchema });
+
+export const searchV3EnvelopeSchema = z.object({ data: z.array(memorySearchV3ResultSchema) });
+export const recentV3EnvelopeSchema = z.object({ data: z.array(derivedMemorySchema) });
+export const contextV3EnvelopeSchema = z.object({ data: personalContextPackSchema });
+export const taskV3EnvelopeSchema = z.object({ data: taskV3DetailSchema });
+export const skillV3EnvelopeSchema = z.object({ data: skillV3DetailSchema });
+export const relevantSkillsV3EnvelopeSchema = z.object({ data: z.array(relevantSkillSchema) });
+export const workstreamStateV3EnvelopeSchema = z.object({ data: workstreamStateSchema });
+
+export const searchMemoryV3OutputSchema = z.object({
+  results: z.array(memorySearchV3ResultSchema), resultCount: z.number().int().nonnegative(), trustBoundary: z.string(),
+});
+export const recentActivityV3OutputSchema = z.object({ memories: z.array(derivedMemorySchema), trustBoundary: z.string() });
+export const episodeV3OutputSchema = z.object({ context: taskV3DetailSchema, trustBoundary: z.string() });
+export const recallContextV3OutputSchema = z.object({ context: personalContextPackSchema, trustBoundary: z.string() });
+export const timelineV3OutputSchema = z.object({ entries: z.array(memorySearchV3ResultSchema), trustBoundary: z.string() });
+export const relevantSkillsOutputSchema = z.object({ skills: z.array(relevantSkillSchema), trustBoundary: z.string() });
+export const skillOutputSchema = z.object({ skill: skillV3DetailSchema, trustBoundary: z.string() });
+export const projectStateOutputSchema = z.object({ state: workstreamStateSchema, trustBoundary: z.string() });
+
 export type TaskMemory = z.infer<typeof taskMemorySchema>;
 export type MemorySearchResult = z.infer<typeof memorySearchResultSchema>;
 export type EvidenceItem = z.infer<typeof evidenceItemSchema>;

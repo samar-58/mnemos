@@ -4,13 +4,12 @@ struct AgentsSettingsView: View {
     @EnvironmentObject private var model: AppModel
 
     private static let endpoints: [(path: String, detail: String)] = [
-        ("/v2/health", "Index health and counts"),
-        ("/v2/sessions/recent", "Recent tasks, grouped by session"),
-        ("/v2/search?q=…", "Filtered task retrieval"),
-        ("/v2/context?q=…", "A bounded context pack"),
-        ("/v2/tasks/{id}", "One task, its spans, and its neighbours"),
-        ("/v2/tasks/{id}/evidence", "Evidence, paginated"),
-        ("/v2/timeline", "An explicit time range"),
+        ("/v3/context/current", "State, memories, and approved skills"),
+        ("/v3/memories/search?q=…", "Evidence-backed memory retrieval"),
+        ("/v3/tasks/{id}", "Task facts and its derived memory"),
+        ("/v3/skills/relevant", "Approved skills only"),
+        ("/v3/workstreams/{id}/state", "Decisions and open work"),
+        ("/v2/tasks/{id}/evidence", "Explicit provenance escape hatch"),
     ]
 
     var body: some View {

@@ -5,6 +5,8 @@ enum SidebarItem: Hashable, Identifiable {
     case recent
     case today
     case pinned
+    case patterns
+    case skills
     case workstream(String)
 
     var id: String {
@@ -12,13 +14,17 @@ enum SidebarItem: Hashable, Identifiable {
         case .recent: "library.recent"
         case .today: "library.today"
         case .pinned: "library.pinned"
+        case .patterns: "intelligence.patterns"
+        case .skills: "intelligence.skills"
         case let .workstream(id): "workstream.\(id)"
         }
     }
 
     var isLibrary: Bool {
-        if case .workstream = self { return false }
-        return true
+        switch self {
+        case .workstream: false
+        default: true
+        }
     }
 }
 
@@ -65,6 +71,10 @@ final class MemoryBrowser: ObservableObject {
     }
     @Published var selectedTaskIDs: Set<String> = []
     @Published var selectedSpanIDs: Set<String> = []
+    /// Selection inside the Patterns and Skills lists. These stay separate from
+    /// task selection so switching sections never carries a stale detail view.
+    @Published var selectedPatternID: String?
+    @Published var selectedSkillID: String?
     /// Set when the user asks to rename from a menu, so the detail view can put
     /// the caret in the title field.
     @Published var renameRequestID: String?
@@ -114,7 +124,8 @@ final class MemoryBrowser: ObservableObject {
     /// True when anything narrows the list: a query, a scope, an application
     /// filter, or a sidebar selection other than Recent.
     var isFiltering: Bool {
-        !trimmedQuery.isEmpty
+        guard sidebarSelection != .patterns, sidebarSelection != .skills else { return false }
+        return !trimmedQuery.isEmpty
             || searchScope != .all
             || applicationFilter != nil
             || sidebarSelection != .recent
@@ -228,6 +239,17 @@ final class MemoryBrowser: ObservableObject {
     }
 
     func applyFilters() {
+        guard sidebarSelection != .patterns, sidebarSelection != .skills else {
+            searchResults = []
+            isSearching = false
+            selectedTaskIDs = []
+            if sidebarSelection != .patterns { selectedPatternID = nil }
+            if sidebarSelection != .skills { selectedSkillID = nil }
+            selectionDidChange()
+            return
+        }
+        selectedPatternID = nil
+        selectedSkillID = nil
         searchGeneration += 1
         let generation = searchGeneration
 
@@ -269,6 +291,8 @@ final class MemoryBrowser: ObservableObject {
             from = max(from ?? startOfDay, startOfDay)
         case .pinned:
             pinnedOnly = true
+        case .patterns, .skills:
+            break
         case let .workstream(id):
             workstreamKey = workstream(id: id)?.canonicalKey
         }

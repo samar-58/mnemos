@@ -26,6 +26,13 @@ struct SidebarView: View {
                     .tag(SidebarItem.pinned)
             }
 
+            Section("Intelligence") {
+                Label("Patterns", systemImage: "point.3.filled.connected.trianglepath.dotted")
+                    .tag(SidebarItem.patterns)
+                Label("Skills", systemImage: "wand.and.stars")
+                    .tag(SidebarItem.skills)
+            }
+
             if !activeWorkstreams.isEmpty {
                 Section("Projects") {
                     ForEach(activeWorkstreams) { summary in
