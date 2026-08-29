@@ -153,6 +153,70 @@ final class PersonalContextTests: XCTestCase {
         await fixture.shutdown()
     }
 
+    /// The packet is the only thing that ever leaves this Mac, and the
+    /// Intelligence tab now shows it verbatim. It must contain nothing from a
+    /// source the user did not consent to, and no redacted secret.
+    func testOutboundPacketExcludesNonConsentedSourcesAndSecrets() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        UserDefaults.standard.set(true, forKey: PersonalContextStore.cloudEnabledDefaultsKey)
+        await fixture.personal.setCloudSources(bundleIDs: ["com.mitchellh.ghostty"], domains: [])
+
+        let start = Date.now.addingTimeInterval(-3_600)
+        let events = [
+            CapturedEvent(
+                timestamp: start, kind: .terminal, applicationName: "Ghostty",
+                bundleID: "com.mitchellh.ghostty", windowTitle: "deploy", detail: "swift test run"
+            ),
+            // Consented source carrying something redaction must remove.
+            CapturedEvent(
+                timestamp: start.addingTimeInterval(1), kind: .terminal, applicationName: "Ghostty",
+                bundleID: "com.mitchellh.ghostty", windowTitle: "deploy",
+                detail: "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"
+            ),
+            CapturedEvent(
+                timestamp: start.addingTimeInterval(2), kind: .terminal, applicationName: "Ghostty",
+                bundleID: "com.mitchellh.ghostty", windowTitle: "deploy", detail: "git commit -m ship"
+            ),
+            // A source the user never consented to send.
+            CapturedEvent(
+                timestamp: start.addingTimeInterval(5), kind: .terminal, applicationName: "Notes",
+                bundleID: "com.apple.Notes", windowTitle: "Private journal",
+                detail: "personal-journal-entry-marker"
+            ),
+            CapturedEvent(
+                timestamp: start.addingTimeInterval(10), kind: .session, applicationName: "macOS",
+                bundleID: "com.apple.system", detail: "Capture session paused"
+            ),
+        ]
+        for event in events { try await fixture.record(event) }
+        try await Task.sleep(for: .milliseconds(100))
+        try await fixture.personal.prepare()
+
+        let packet = try await fixture.personal.evidencePacket(
+            from: start.addingTimeInterval(-60), to: Date.now
+        )
+        let rendered = String(data: try JSONEncoder().encode(packet), encoding: .utf8) ?? ""
+
+        // Without this the negative assertions could pass on an empty packet.
+        XCTAssertFalse(packet.tasks.isEmpty, "The consented source should produce a packet task.")
+        XCTAssertTrue(rendered.contains("Ghostty"), "The consented application should be present.")
+
+        XCTAssertFalse(
+            rendered.contains("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"),
+            "A redacted secret must never appear in an outbound packet."
+        )
+        XCTAssertFalse(
+            rendered.contains("personal-journal-entry-marker"),
+            "Evidence from a source the user did not consent to must never be sent."
+        )
+        XCTAssertFalse(
+            rendered.contains("com.apple.Notes") || rendered.contains("Private journal"),
+            "A non-consented application must not appear in an outbound packet at all."
+        )
+        await fixture.shutdown()
+    }
+
     func testGrantTokensResolveOnlyWhileActive() async throws {
         let fixture = try Fixture()
         defer { fixture.removeFiles() }

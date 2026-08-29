@@ -19,17 +19,104 @@ struct StatusDot: View {
 struct Chip: View {
     let text: String
     var tint: Color?
+    var symbol: String?
 
     var body: some View {
-        Text(text)
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(tint ?? .secondary)
-            .padding(.horizontal, Spacing.s - 2)
-            .padding(.vertical, 1)
-            .background(
-                (tint ?? Color.secondary).opacity(0.12),
-                in: RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
-            )
+        HStack(spacing: 3) {
+            if let symbol {
+                Image(systemName: symbol).font(.system(size: 9, weight: .semibold))
+            }
+            Text(text).font(.system(size: 10, weight: .medium))
+        }
+        .foregroundStyle(tint ?? .secondary)
+        .padding(.horizontal, Spacing.s - 2)
+        .padding(.vertical, 2)
+        .background(
+            (tint ?? Color.secondary).opacity(0.12),
+            in: RoundedRectangle(cornerRadius: Radius.chip, style: .continuous)
+        )
+    }
+}
+
+/// A list section heading: a quiet uppercase label, with an optional figure on
+/// the right such as the time recorded that day.
+struct SectionHeading: View {
+    let title: String
+    var trailing: String?
+
+    var body: some View {
+        HStack(spacing: Spacing.s) {
+            Text(title.uppercased())
+                .font(TypeScale.section)
+                .foregroundStyle(.secondary)
+                .kerning(0.4)
+            Spacer(minLength: Spacing.s)
+            if let trailing {
+                Text(trailing)
+                    .font(TypeScale.numeric)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.top, Spacing.xs)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A non-blocking failure notice pinned above a scrolling list.
+struct InlineBanner: View {
+    let message: String
+    var symbol = "exclamationmark.triangle.fill"
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Spacing.s) {
+            Image(systemName: symbol)
+                .foregroundStyle(.orange)
+            Text(message)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .font(TypeScale.meta)
+        .padding(.horizontal, Spacing.m)
+        .padding(.vertical, Spacing.s)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+}
+
+/// A titled block of content in the detail pane. Replaces the bare heading and
+/// paragraph pairs, so every section of a memory has the same shape.
+struct DetailCard<Content: View>: View {
+    let title: String
+    var symbol: String?
+    var trailing: String?
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Spacing.s) {
+            HStack(spacing: Spacing.xs) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                }
+                Text(title.uppercased())
+                    .font(TypeScale.section)
+                    .foregroundStyle(.secondary)
+                    .kerning(0.4)
+                Spacer(minLength: Spacing.s)
+                if let trailing {
+                    Text(trailing)
+                        .font(TypeScale.numeric)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            content
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(Spacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Surface.card, in: RoundedRectangle(cornerRadius: Radius.card, style: .continuous))
     }
 }
 

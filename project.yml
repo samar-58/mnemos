@@ -34,7 +34,10 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: Mnemos
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
-        INFOPLIST_KEY_LSUIElement: YES
+        # Mnemos is a regular app, not a background agent: it owns a main window
+        # people work in, so it gets a Dock icon and its own menu bar. The menu
+        # bar extra stays as the quick way in. Capture survives the window being
+        # closed because the MenuBarExtra keeps the app alive.
         INFOPLIST_KEY_NSPrincipalClass: NSApplication
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon

@@ -47,11 +47,16 @@ enum SearchScope: String, CaseIterable, Identifiable {
     }
 }
 
-/// One day of tasks in the list.
+/// One day of the timeline, already grouped into the entries the list renders.
 struct TaskDay: Identifiable {
     let id: Date
     let label: String
-    let tasks: [TaskMemory]
+    let entries: [TimelineGroup]
+
+    var tasks: [TaskMemory] { entries.flatMap(\.tasks) }
+
+    /// Total time recorded that day, used in the day heading.
+    var activeSeconds: TimeInterval { entries.reduce(0) { $0 + $1.activeSeconds } }
 }
 
 /// Owns everything the memory UI browses: the current sidebar selection, the
@@ -71,6 +76,17 @@ final class MemoryBrowser: ObservableObject {
     }
     @Published var selectedTaskIDs: Set<String> = []
     @Published var selectedSpanIDs: Set<String> = []
+    /// Timeline groups the user has opened. Collapsed is the default — the
+    /// point of the roll-up is that a day reads as a handful of projects rather
+    /// than as every episode the segmenter happened to cut.
+    @Published var expandedGroupIDs: Set<String> = []
+    /// The rolled-up group the detail pane is showing, if any.
+    ///
+    /// This is deliberately kept out of `selectedTaskIDs`: a collapsed group's
+    /// episodes have no rows in the list, and a `List` selection made of ids it
+    /// cannot see is not something to rely on. Exactly one of these two is
+    /// active at a time.
+    @Published private(set) var selectedGroupID: String?
     /// Selection inside the Patterns and Skills lists. These stay separate from
     /// task selection so switching sections never carries a stale detail view.
     @Published var selectedPatternID: String?
@@ -89,6 +105,10 @@ final class MemoryBrowser: ObservableObject {
     @Published private(set) var selectedTask: TaskMemory?
     @Published private(set) var selectedTaskSpans: [ActivitySpan] = []
     @Published private(set) var selectedTaskEvidence: [EvidenceItem] = []
+    /// Spans for every task in a multi-episode selection, keyed by task id, so
+    /// the group view can show each episode's activity without reloading as the
+    /// user opens them.
+    @Published private(set) var selectedGroupSpans: [String: [ActivitySpan]] = [:]
     @Published private(set) var isSearching = false
     @Published private(set) var isLoadingMore = false
     @Published private(set) var reachedEnd = false
@@ -112,6 +132,10 @@ final class MemoryBrowser: ObservableObject {
 
     private let store: ContextEngineStore
     private var searchGeneration = 0
+    /// Guards detail loads against each other, so a slow group load never
+    /// overwrites the selection that replaced it.
+    private var detailGeneration = 0
+    private var hasAutoSelected = false
     private var searchDebounce: Task<Void, Never>?
     private static let pageSize = 50
 
@@ -142,11 +166,14 @@ final class MemoryBrowser: ObservableObject {
         isFiltering ? nil : displayedTasks.first(where: \.isOpen)
     }
 
-    /// Tasks grouped into day sections, newest first. Excludes `nowTask`, which
-    /// the list renders separately.
+    /// Tasks grouped into day sections, newest first, with each day's episodes
+    /// rolled up per project. Excludes `nowTask`, which the list renders
+    /// separately. A search shows every match on its own line instead, because
+    /// hiding a hit inside a collapsed group makes the result look missing.
     var days: [TaskDay] {
         let calendar = Calendar.current
         let nowID = nowTask?.id
+        let rollUp = trimmedQuery.isEmpty
         var order: [Date] = []
         var buckets: [Date: [TaskMemory]] = [:]
         for task in displayedTasks where task.id != nowID {
@@ -157,12 +184,56 @@ final class MemoryBrowser: ObservableObject {
             }
             buckets[day]?.append(task)
         }
-        return order.map { TaskDay(id: $0, label: DayHeading.label(for: $0), tasks: buckets[$0] ?? []) }
+        return order.map { day in
+            let tasks = buckets[day] ?? []
+            let entries = rollUp
+                ? TimelineGroup.group(tasks)
+                : tasks.map { TimelineGroup(tasks: [$0], workstreamID: $0.workstream?.id) }
+            return TaskDay(id: day, label: DayHeading.label(for: day), entries: entries)
+        }
+    }
+
+    /// The entry a task id belongs to, so the list can keep a group expanded
+    /// when one of its episodes is revealed from elsewhere.
+    func group(containing taskID: String) -> TimelineGroup? {
+        days.lazy.flatMap(\.entries).first { $0.taskIDs.contains(taskID) }
     }
 
     /// Every application seen in the current list, for the filter menu.
     var availableApplications: [String] {
         Set(displayedTasks.flatMap(\.applications)).sorted()
+    }
+
+    /// Projects worth a sidebar row, most recently worked on first.
+    ///
+    /// Anchors are derived from paths and URLs, which produces a long tail of
+    /// fragments — a bare `https:`, a mail message id, a numeric path segment.
+    /// Those still group their tasks in the store; they just do not belong in a
+    /// list a person is meant to navigate by. Case-only duplicates collapse to
+    /// the busier of the two.
+    var sidebarProjects: [WorkstreamSummary] {
+        var byName: [String: WorkstreamSummary] = [:]
+        for summary in workstreams where summary.taskCount > 0 {
+            guard ProjectName.isMeaningful(summary.workstream.displayName) else { continue }
+            let key = ProjectName.display(summary.workstream.displayName).lowercased()
+            if let existing = byName[key], existing.taskCount >= summary.taskCount { continue }
+            byName[key] = summary
+        }
+        return byName.values.sorted { left, right in
+            switch (left.lastActivityAt, right.lastActivityAt) {
+            case let (l?, r?) where l != r: return l > r
+            case (nil, _?): return false
+            case (_?, nil): return true
+            default: return left.taskCount > right.taskCount
+            }
+        }
+    }
+
+    /// Projects hidden from the sidebar because their derived name carries no
+    /// information. Surfaced as a count so the list never silently lies about
+    /// how much it is showing.
+    var hiddenProjectCount: Int {
+        workstreams.filter { $0.taskCount > 0 }.count - sidebarProjects.count
     }
 
     var selectedTasks: [TaskMemory] {
@@ -171,6 +242,29 @@ final class MemoryBrowser: ObservableObject {
 
     func result(for taskID: String) -> ContextSearchResult? {
         searchResults.first { $0.id == taskID }
+    }
+
+    /// The selected task's activity with consecutive look-alike spans folded
+    /// together, which is what the detail view lists.
+    var selectedTaskSteps: [ActivityStep] {
+        ActivityStep.collapse(selectedTaskSpans)
+    }
+
+    /// Spans behind the current activity selection. A row stands for a whole
+    /// step, so splitting or moving has to act on every span in it — otherwise
+    /// a step that reads "×3" would only move a third of itself.
+    private var resolvedSpanIDs: [String] {
+        let steps = selectedTaskSteps
+        guard !steps.isEmpty else { return Array(selectedSpanIDs) }
+        var ids: [String] = []
+        for step in steps where selectedSpanIDs.contains(step.id) {
+            ids.append(contentsOf: step.spanIDs)
+        }
+        // Anything selected that is not a step leader — a stale id, or a
+        // selection made before the spans reloaded — still gets carried through.
+        let known = Set(steps.map(\.id))
+        ids.append(contentsOf: selectedSpanIDs.filter { !known.contains($0) })
+        return Array(Set(ids))
     }
 
     func workstream(id: String) -> Workstream? {
@@ -202,6 +296,7 @@ final class MemoryBrowser: ObservableObject {
                     self.selectedTask = refreshed
                 }
                 if isFiltering { applyFilters() }
+                selectFirstIfNothingChosen()
             } catch {
                 health = await store.health()
                 self.error = error.localizedDescription
@@ -239,6 +334,10 @@ final class MemoryBrowser: ObservableObject {
     }
 
     func applyFilters() {
+        // A group belongs to the list that produced it; changing what the list
+        // shows retires it rather than leaving the detail pane on a group the
+        // user can no longer see.
+        selectedGroupID = nil
         guard sidebarSelection != .patterns, sidebarSelection != .skills else {
             searchResults = []
             isSearching = false
@@ -331,23 +430,82 @@ final class MemoryBrowser: ObservableObject {
 
     // MARK: - Selection
 
+    /// Called whenever the list's own selection changes. An empty selection
+    /// while a group is open is the state `selectGroup` deliberately puts the
+    /// browser in, so it is left alone.
     func selectionDidChange() {
         selectedSpanIDs = []
-        guard selectedTaskIDs.count == 1,
-              let id = selectedTaskIDs.first,
-              let task = displayedTasks.first(where: { $0.id == id }) else {
-            selectedTask = nil
-            selectedTaskSpans = []
-            selectedTaskEvidence = []
+        let tasks = selectedTasks
+        guard !tasks.isEmpty else {
+            if selectedGroupID == nil { clearDetail() }
             return
         }
-        loadDetail(for: task)
+        selectedGroupID = nil
+        if tasks.count == 1 {
+            loadDetail(for: tasks[0])
+        } else {
+            loadDetail(forGroup: tasks)
+        }
+    }
+
+    /// Opens the newest thing in the list the first time there is anything to
+    /// open, so the window does not present three columns with an empty pane in
+    /// the largest one. Only ever fires once: after that, an empty selection is
+    /// something the user chose.
+    private func selectFirstIfNothingChosen() {
+        guard !hasAutoSelected, selectedTaskIDs.isEmpty, selectedGroupID == nil else { return }
+        if let now = nowTask {
+            hasAutoSelected = true
+            selectedTaskIDs = [now.id]
+            selectionDidChange()
+            return
+        }
+        guard let first = days.first?.entries.first else { return }
+        hasAutoSelected = true
+        if first.isGroup {
+            selectGroup(first)
+        } else {
+            selectedTaskIDs = [first.lead.id]
+            selectionDidChange()
+        }
+    }
+
+    /// Opens a rolled-up group in the detail pane.
+    func selectGroup(_ group: TimelineGroup) {
+        selectedGroupID = group.id
+        selectedTaskIDs = []
+        selectedSpanIDs = []
+        loadDetail(forGroup: group.tasks)
+    }
+
+    /// The group currently open, resolved against the list as it stands now so
+    /// it keeps up with new activity landing in the same project.
+    var selectedGroup: TimelineGroup? {
+        guard let selectedGroupID else { return nil }
+        return days.lazy.flatMap(\.entries).first { $0.id == selectedGroupID }
+    }
+
+    /// The tasks the detail pane is acting on, whichever selection is active.
+    var focusedTasks: [TaskMemory] {
+        if let selectedGroup { return selectedGroup.tasks }
+        return selectedTasks
+    }
+
+    private func clearDetail() {
+        selectedTask = nil
+        selectedTaskSpans = []
+        selectedTaskEvidence = []
+        selectedGroupSpans = [:]
+        selectedGroupID = nil
     }
 
     private func loadDetail(for task: TaskMemory) {
         selectedTask = task
         selectedTaskSpans = []
         selectedTaskEvidence = []
+        selectedGroupSpans = [:]
+        detailGeneration += 1
+        let generation = detailGeneration
         Task { [weak self] in
             guard let self else { return }
             do {
@@ -355,9 +513,41 @@ final class MemoryBrowser: ObservableObject {
                 async let evidence = store.evidence(for: task.id)
                 let loadedSpans = try await spans
                 let loadedEvidence = try await evidence
-                guard selectedTask?.id == task.id else { return }
+                guard generation == detailGeneration, selectedTask?.id == task.id else { return }
                 selectedTaskSpans = loadedSpans
                 selectedTaskEvidence = loadedEvidence
+                error = nil
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    /// Loads the activity behind a whole timeline group. Evidence is pooled
+    /// across the episodes so "Copy context" and the sources inspector describe
+    /// the group the user is actually looking at.
+    private func loadDetail(forGroup tasks: [TaskMemory]) {
+        selectedTask = nil
+        selectedTaskSpans = []
+        selectedTaskEvidence = []
+        selectedGroupSpans = [:]
+        let ids = tasks.map(\.id)
+        detailGeneration += 1
+        let generation = detailGeneration
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                var spansByTask: [String: [ActivitySpan]] = [:]
+                var evidence: [EvidenceItem] = []
+                for id in ids {
+                    async let spans = store.spans(for: id)
+                    async let items = store.evidence(for: id)
+                    spansByTask[id] = try await spans
+                    evidence.append(contentsOf: try await items)
+                }
+                guard generation == detailGeneration else { return }
+                selectedGroupSpans = spansByTask
+                selectedTaskEvidence = evidence.sorted { $0.timestamp > $1.timestamp }
                 error = nil
             } catch {
                 self.error = error.localizedDescription
@@ -384,6 +574,7 @@ final class MemoryBrowser: ObservableObject {
     /// panel — clearing filters if it is not currently visible.
     func reveal(taskID: String) {
         if displayedTasks.contains(where: { $0.id == taskID }) {
+            if let group = group(containing: taskID) { expandedGroupIDs.insert(group.id) }
             selectedTaskIDs = [taskID]
             selectionDidChange()
             return
@@ -431,20 +622,29 @@ final class MemoryBrowser: ObservableObject {
     }
 
     func mergeSelected() {
-        let ids = Array(selectedTaskIDs)
-        guard ids.count >= 2 else { return }
-        mutate { try await $0.mergeTasks(ids) }
+        merge(taskIDs: focusedTasks.map(\.id))
+    }
+
+    /// Merges an explicit set of episodes, so a rolled-up group can be made
+    /// permanent without first having to select its rows.
+    func merge(taskIDs: [String]) {
+        guard taskIDs.count >= 2 else { return }
+        // The group about to disappear must not stay selected, or the detail
+        // pane would keep pointing at ids the merge has already consumed.
+        selectedGroupID = nil
+        selectedTaskIDs = []
+        mutate { try await $0.mergeTasks(taskIDs) }
     }
 
     func splitSelectedSpans() {
-        let ids = Array(selectedSpanIDs)
+        let ids = resolvedSpanIDs
         guard !ids.isEmpty else { return }
         selectedSpanIDs = []
         mutate { _ = try await $0.moveSpans(ids, to: nil) }
     }
 
     func moveSelectedSpans(to taskID: String) {
-        let ids = Array(selectedSpanIDs)
+        let ids = resolvedSpanIDs
         guard !ids.isEmpty else { return }
         selectedSpanIDs = []
         mutate { _ = try await $0.moveSpans(ids, to: taskID) }
@@ -453,6 +653,15 @@ final class MemoryBrowser: ObservableObject {
     func assignSelectedTask(toWorkstream workstreamID: String?) {
         guard let id = selectedTask?.id else { return }
         mutate { try await $0.assignTask(id, toWorkstream: workstreamID) }
+    }
+
+    /// Reassigns several tasks in one pass, so moving a whole timeline group to
+    /// another project costs one refresh rather than one per episode.
+    func assign(taskIDs: [String], toWorkstream workstreamID: String?) {
+        guard !taskIDs.isEmpty else { return }
+        mutate { store in
+            for id in taskIDs { try await store.assignTask(id, toWorkstream: workstreamID) }
+        }
     }
 
     // MARK: - Storage settings
@@ -517,6 +726,8 @@ final class MemoryBrowser: ObservableObject {
                 refresh()
                 if let id = selectedTask?.id, let refreshed = try await store.task(id: id) {
                     loadDetail(for: refreshed)
+                } else if let group = selectedGroup {
+                    loadDetail(forGroup: group.tasks)
                 }
             } catch {
                 self.error = error.localizedDescription

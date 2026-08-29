@@ -27,6 +27,9 @@ enum Narrative {
         if let application = raw.remainder(after: "Activity in ") {
             return "Worked in \(application)"
         }
+        if let project = raw.remainder(after: "Working on ") {
+            return ProjectName.display(project)
+        }
 
         var cleaned = stripApplicationSuffix(raw, applications: task.applications)
         if let name = fileName(cleaned) { cleaned = name }
@@ -42,7 +45,7 @@ enum Narrative {
 
         let verb = verbPhrase(for: task.actions)
         let apps = list(task.applications.prefix(3).map { $0 })
-        let project = task.workstream.map { " on \($0.displayName)" } ?? ""
+        let project = self.project(for: task).map { " on \($0)" } ?? ""
 
         if apps.isEmpty {
             sentences.append("\(verb)\(project).")
@@ -60,8 +63,8 @@ enum Narrative {
     /// The quiet caption under a memory: when, which project, which apps.
     static func meta(for task: TaskMemory) -> String {
         var parts = [timeRange(for: task)]
-        if let workstream = task.workstream {
-            parts.append(workstream.displayName)
+        if let project = project(for: task) {
+            parts.append(project)
         }
         let apps = task.applications.prefix(3).joined(separator: " + ")
         if !apps.isEmpty {
@@ -86,10 +89,14 @@ enum Narrative {
     }
 
     /// Where the work stopped, as a file name or a site rather than a raw path.
+    /// Returns nil when the stored state is a keystroke or another fragment that
+    /// would read as an answer without being one.
     static func lastPlace(for task: TaskMemory) -> String? {
-        guard let state = task.lastState?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !state.isEmpty else { return nil }
-        return truncate(place(state), limit: 90)
+        guard LastState.isMeaningful(task.lastState),
+              let state = task.lastState?.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        let resolved = place(state)
+        guard LastState.isMeaningful(resolved) else { return nil }
+        return truncate(resolved, limit: 90)
     }
 
     // MARK: - Activity
@@ -115,6 +122,28 @@ enum Narrative {
     /// A file or link split into what to show and what to reveal on hover.
     static func artifact(_ raw: String) -> (label: String, detail: String) {
         (label: place(raw), detail: raw)
+    }
+
+    /// The task's files and links, ready to list: collapsed to one entry per
+    /// visible label, and with the entry that only restates the project name
+    /// removed, since the project is already shown in the header.
+    static func artifacts(for task: TaskMemory, limit: Int = 12) -> [(id: String, label: String, detail: String)] {
+        let projectLabel = task.workstream.map { ProjectName.display($0.displayName).lowercased() }
+        var seen = Set<String>()
+        var items: [(id: String, label: String, detail: String)] = []
+        for raw in task.artifacts {
+            let item = artifact(raw)
+            let key = item.label.lowercased()
+            guard !key.isEmpty, key != projectLabel, seen.insert(key).inserted else { continue }
+            items.append((id: raw, label: item.label, detail: item.detail))
+            if items.count == limit { break }
+        }
+        return items
+    }
+
+    /// The project name as a person should read it.
+    static func project(for task: TaskMemory) -> String? {
+        task.workstream.map { ProjectName.display($0.displayName) }
     }
 
     // MARK: - Building blocks
@@ -224,11 +253,55 @@ enum ContextClipboard {
         NSPasteboard.general.setString(text(task: task, evidence: evidence), forType: .string)
     }
 
+    /// Several episodes of the same work as one block of context, so pasting a
+    /// grouped afternoon into an agent reads as an afternoon rather than as six
+    /// disconnected fragments. Evidence is attached once at the end because it
+    /// was pooled across the group.
+    @MainActor
+    static func copy(tasks: [TaskMemory], evidence: [EvidenceItem]) {
+        guard !tasks.isEmpty else { return }
+        guard tasks.count > 1 else { return copy(task: tasks[0], evidence: evidence) }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text(tasks: tasks, evidence: evidence), forType: .string)
+    }
+
+    static func text(tasks: [TaskMemory], evidence: [EvidenceItem]) -> String {
+        guard let first = tasks.last, let last = tasks.first else { return "" }
+        let heading = Narrative.project(for: last) ?? Narrative.title(for: last)
+        var lines = ["# \(heading)"]
+        lines.append(
+            "\(first.startedAt.formatted(date: .abbreviated, time: .shortened))"
+                + " – \(last.endedAt.formatted(date: .omitted, time: .shortened))"
+                + " · \(tasks.count) sessions"
+        )
+        lines.append("")
+        for task in tasks {
+            lines.append("## \(Narrative.timeRange(for: task))")
+            if !task.digest.isEmpty { lines.append(task.digest) }
+            if let state = task.lastState, LastState.isMeaningful(state) {
+                lines.append("Left off at: \(state)")
+            }
+            lines.append("")
+        }
+        let artifacts = Set(tasks.flatMap(\.artifacts)).sorted().prefix(10)
+        if !artifacts.isEmpty {
+            lines.append("Files and links:")
+            lines.append(contentsOf: artifacts.map { "- \($0)" })
+            lines.append("")
+        }
+        let excerpts = evidence.compactMap(\.excerpt).prefix(6)
+        if !excerpts.isEmpty {
+            lines.append("Evidence:")
+            lines.append(contentsOf: excerpts.map { "- \($0)" })
+        }
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     static func text(task: TaskMemory, evidence: [EvidenceItem]) -> String {
         var lines = ["# \(task.title)"]
         lines.append(task.startedAt.formatted(date: .abbreviated, time: .shortened))
         if !task.digest.isEmpty { lines.append(task.digest) }
-        if let state = task.lastState, !state.isEmpty { lines.append("Left off at: \(state)") }
+        if let state = task.lastState, LastState.isMeaningful(state) { lines.append("Left off at: \(state)") }
         if !task.artifacts.isEmpty {
             lines.append("Files and links:")
             lines.append(contentsOf: task.artifacts.prefix(6).map { "- \($0)" })

@@ -2,7 +2,9 @@ import ApplicationServices
 import Foundation
 
 enum CapturePrivacy {
-    private static let minimumRedactionPolicyVersion = 2
+    /// v3 widened the secret-keyword rule to match keywords inside longer
+    /// identifiers. Rows still stamped v2 were captured under the narrower rule.
+    private static let minimumRedactionPolicyVersion = 3
     private static let redactionPolicyVersionDefaultsKey = "redactionPolicyVersion"
     static var redactionPolicyVersion: Int {
         max(minimumRedactionPolicyVersion, UserDefaults.standard.integer(forKey: redactionPolicyVersionDefaultsKey))
@@ -77,7 +79,14 @@ enum CapturePrivacy {
         var redacted = value
         let patterns: [(String, String)] = [
             (#"(?i)(authorization:\s*bearer\s+)[A-Za-z0-9._~+/=-]+"#, "$1[REDACTED]"),
-            (#"(?i)\b(api[_-]?key|secret|token|password)\s*[:=]\s*[^\s,;]+"#, "$1=[REDACTED]"),
+            // The keyword may sit inside a longer identifier, as it does in
+            // every shell export: AWS_SECRET_ACCESS_KEY, DB_PASSWORD, and so
+            // on. Anchoring on \b(secret) alone missed all of them, because an
+            // underscore is a word character.
+            (
+                #"(?i)\b([A-Za-z0-9_.-]*(?:api[_-]?key|secret|token|password|passwd|credential)[A-Za-z0-9_.-]*)\s*[:=]\s*[^\s,;]+"#,
+                "$1=[REDACTED]"
+            ),
             (#"\bsk-[A-Za-z0-9_-]{16,}\b"#, "[REDACTED API KEY]"),
             (#"\bgh[pousr]_[A-Za-z0-9]{16,}\b"#, "[REDACTED GITHUB TOKEN]"),
             (#"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"#, "[REDACTED SLACK TOKEN]"),

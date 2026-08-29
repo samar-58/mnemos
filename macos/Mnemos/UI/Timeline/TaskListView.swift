@@ -74,21 +74,26 @@ struct TaskListView: View {
 
     private var patterns: some View {
         List(model.workflowPatterns, selection: $browser.selectedPatternID) { pattern in
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                HStack {
-                    Text(pattern.title).font(.headline)
-                    Spacer()
-                    Text("\(Int(pattern.confidence * 100))%")
-                        .font(.caption.monospacedDigit())
+            HStack(alignment: .top, spacing: Spacing.s) {
+                RowIcon(systemImage: Glyph.patterns)
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    HStack(spacing: Spacing.xs) {
+                        Text(pattern.title)
+                            .font(TypeScale.rowTitle)
+                            .lineLimit(1)
+                        Spacer(minLength: Spacing.s)
+                        Text("\(Int(pattern.confidence * 100))%")
+                            .font(TypeScale.numeric)
+                            .foregroundStyle(.secondary)
+                    }
+                    Text(pattern.summary)
+                        .font(TypeScale.rowBody)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Text("\(pattern.occurrenceCount) occurrences · \(pattern.status.rawValue.capitalized)")
+                        .font(TypeScale.meta)
+                        .foregroundStyle(.tertiary)
                 }
-                Text(pattern.summary)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Text("\(pattern.occurrenceCount) occurrences · \(pattern.status.rawValue.capitalized)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
             .padding(.vertical, Spacing.xs)
             .tag(pattern.id)
@@ -106,24 +111,29 @@ struct TaskListView: View {
 
     private var skills: some View {
         List(model.personalSkills, selection: $browser.selectedSkillID) { skill in
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                HStack(spacing: Spacing.s) {
-                    Text(skill.title).font(.headline)
-                    Spacer()
-                    SkillStatusChip(status: skill.status)
-                }
-                Text(skill.description)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                HStack(spacing: Spacing.xs) {
-                    Text("\(skill.occurrenceCount) workflows · \(Int(skill.confidence * 100))% confidence")
-                    if model.skillActivity[skill.id]?.isExported == true {
-                        Text("· Exported")
+            HStack(alignment: .top, spacing: Spacing.s) {
+                RowIcon(systemImage: Glyph.skills)
+                VStack(alignment: .leading, spacing: Spacing.xxs) {
+                    HStack(spacing: Spacing.s) {
+                        Text(skill.title)
+                            .font(TypeScale.rowTitle)
+                            .lineLimit(1)
+                        Spacer(minLength: Spacing.s)
+                        SkillStatusChip(status: skill.status)
                     }
+                    Text(skill.description)
+                        .font(TypeScale.rowBody)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    HStack(spacing: Spacing.xs) {
+                        Text("\(skill.occurrenceCount) workflows · \(Int(skill.confidence * 100))% confidence")
+                        if model.skillActivity[skill.id]?.isExported == true {
+                            Text("· Exported")
+                        }
+                    }
+                    .font(TypeScale.meta)
+                    .foregroundStyle(.tertiary)
                 }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
             }
             .padding(.vertical, Spacing.xs)
             .tag(skill.id)
@@ -142,20 +152,22 @@ struct TaskListView: View {
     private var list: some View {
         List(selection: $browser.selectedTaskIDs) {
             if let now = browser.nowTask {
-                Section("Now") {
+                Section {
                     TaskRow(task: now, result: browser.result(for: now.id))
                         .tag(now.id)
                         .contextMenu { menu(for: now) }
+                } header: {
+                    SectionHeading(title: "Now")
                 }
             }
 
             ForEach(browser.days) { day in
-                Section(day.label) {
-                    ForEach(day.tasks) { task in
-                        TaskRow(task: task, result: browser.result(for: task.id))
-                            .tag(task.id)
-                            .contextMenu { menu(for: task) }
+                Section {
+                    ForEach(day.entries) { entry in
+                        groupRows(entry)
                     }
+                } header: {
+                    SectionHeading(title: day.label, trailing: Elapsed.label(seconds: day.activeSeconds))
                 }
             }
 
@@ -172,15 +184,51 @@ struct TaskListView: View {
         }
         .listStyle(.inset)
         .onChange(of: browser.selectedTaskIDs) { _, _ in browser.selectionDidChange() }
-        .overlay(alignment: .top) {
+        .safeAreaInset(edge: .top, spacing: 0) {
             if let error = browser.error {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .padding(Spacing.s)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.bar)
+                InlineBanner(message: error)
             }
+        }
+    }
+
+    /// A single-episode entry is a plain row; a rolled-up one is a header that
+    /// selects the whole group, with its episodes underneath when opened.
+    @ViewBuilder
+    private func groupRows(_ entry: TimelineGroup) -> some View {
+        if entry.isGroup {
+            TimelineGroupRow(
+                entry: entry,
+                isExpanded: browser.expandedGroupIDs.contains(entry.id),
+                isSelected: browser.selectedGroupID == entry.id,
+                onToggle: {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        if browser.expandedGroupIDs.contains(entry.id) {
+                            browser.expandedGroupIDs.remove(entry.id)
+                        } else {
+                            browser.expandedGroupIDs.insert(entry.id)
+                        }
+                    }
+                },
+                onSelect: { browser.selectGroup(entry) }
+            )
+            .listRowInsets(EdgeInsets(top: 0, leading: Spacing.xs, bottom: 0, trailing: Spacing.xs))
+            .listRowSeparator(.hidden)
+            .selectionDisabled()
+            .contextMenu { groupMenu(for: entry) }
+
+            if browser.expandedGroupIDs.contains(entry.id) {
+                ForEach(entry.tasks) { task in
+                    TaskRow(task: task, result: browser.result(for: task.id), isNested: true)
+                        .padding(.leading, Spacing.l)
+                        .tag(task.id)
+                        .listRowSeparator(.hidden)
+                        .contextMenu { menu(for: task) }
+                }
+            }
+        } else {
+            TaskRow(task: entry.lead, result: browser.result(for: entry.lead.id))
+                .tag(entry.lead.id)
+                .contextMenu { menu(for: entry.lead) }
         }
     }
 
@@ -249,6 +297,39 @@ struct TaskListView: View {
         }
     }
 
+    /// Actions on a whole rolled-up entry. Merging is offered here because the
+    /// roll-up only hides the fragmentation — merging is how a person makes the
+    /// grouping permanent, so the store, search, and the agent API agree with
+    /// what the list shows.
+    @ViewBuilder
+    private func groupMenu(for entry: TimelineGroup) -> some View {
+        Button(browser.expandedGroupIDs.contains(entry.id) ? "Collapse" : "Expand \(entry.tasks.count) Sessions") {
+            if browser.expandedGroupIDs.contains(entry.id) {
+                browser.expandedGroupIDs.remove(entry.id)
+            } else {
+                browser.expandedGroupIDs.insert(entry.id)
+            }
+        }
+        Divider()
+        Button("Merge Into One Task") {
+            browser.merge(taskIDs: entry.tasks.map(\.id))
+        }
+        Menu("Project") {
+            Button("None") { assign(entry, to: nil) }
+            Divider()
+            ForEach(browser.sidebarProjects) { summary in
+                Button(ProjectName.display(summary.workstream.displayName)) {
+                    assign(entry, to: summary.workstream.id)
+                }
+            }
+        }
+        .disabled(browser.sidebarProjects.isEmpty)
+    }
+
+    private func assign(_ entry: TimelineGroup, to workstreamID: String?) {
+        browser.assign(taskIDs: entry.tasks.map(\.id), toWorkstream: workstreamID)
+    }
+
     @ViewBuilder
     private func menu(for task: TaskMemory) -> some View {
         Button(task.isPinned ? "Unpin" : "Pin") { browser.togglePin(taskID: task.id) }
@@ -258,21 +339,15 @@ struct TaskListView: View {
             browser.renameRequestID = task.id
         }
         Menu("Project") {
-            Button("None") {
-                browser.selectedTaskIDs = [task.id]
-                browser.selectionDidChange()
-                browser.assignSelectedTask(toWorkstream: nil)
-            }
+            Button("None") { browser.assign(taskIDs: [task.id], toWorkstream: nil) }
             Divider()
-            ForEach(browser.workstreams) { summary in
-                Button(summary.workstream.displayName) {
-                    browser.selectedTaskIDs = [task.id]
-                    browser.selectionDidChange()
-                    browser.assignSelectedTask(toWorkstream: summary.workstream.id)
+            ForEach(browser.sidebarProjects) { summary in
+                Button(ProjectName.display(summary.workstream.displayName)) {
+                    browser.assign(taskIDs: [task.id], toWorkstream: summary.workstream.id)
                 }
             }
         }
-        .disabled(browser.workstreams.isEmpty)
+        .disabled(browser.sidebarProjects.isEmpty)
         Divider()
         Button("Merge \(browser.selectedTaskIDs.count) Tasks") { browser.mergeSelected() }
             .disabled(browser.selectedTaskIDs.count < 2 || !browser.selectedTaskIDs.contains(task.id))
@@ -306,10 +381,14 @@ struct TaskListView: View {
             return "\(model.personalSkills.count) candidates and approved skills"
         }
         let count = browser.displayedTasks.count
-        let noun = count == 1 ? "task" : "tasks"
+        let noun = count == 1 ? "session" : "sessions"
         if browser.isFiltering, !browser.searchText.isEmpty {
             return "\(count) matching \(noun)"
         }
-        return "\(count) \(noun)"
+        // When episodes were rolled up, say so — otherwise the count reads as a
+        // contradiction of the number of rows on screen.
+        let entries = browser.days.reduce(0) { $0 + $1.entries.count } + (browser.nowTask == nil ? 0 : 1)
+        guard entries > 0, entries < count else { return "\(count) \(noun)" }
+        return "\(entries) grouped from \(count) \(noun)"
     }
 }

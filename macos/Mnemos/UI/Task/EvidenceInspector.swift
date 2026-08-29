@@ -15,11 +15,11 @@ struct EvidenceInspector: View {
 
     var body: some View {
         Group {
-            if browser.selectedTask == nil {
+            if browser.focusedTasks.isEmpty {
                 ContentUnavailableView {
-                    Label("No task selected", systemImage: Glyph.evidence)
+                    Label("Nothing selected", systemImage: Glyph.evidence)
                 } description: {
-                    Text("Pick a task to see what Mnemos saw.")
+                    Text("Pick a session to see what Mnemos saw.")
                 }
             } else if browser.selectedTaskEvidence.isEmpty {
                 ContentUnavailableView {

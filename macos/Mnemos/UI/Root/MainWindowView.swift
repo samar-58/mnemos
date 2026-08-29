@@ -17,21 +17,33 @@ struct MainWindowView: View {
                     EvidenceInspector()
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 440)
                 }
-                .toolbar {
-                    ToolbarItem {
-                        Button {
-                            showsInspector.toggle()
-                        } label: {
-                            Label("Sources", systemImage: Glyph.inspector)
-                        }
-                        .help(showsInspector ? "Hide sources" : "Show what Mnemos saw")
-                    }
-                }
+                .toolbar { detailToolbar }
         }
         .navigationSplitViewStyle(.balanced)
         .onAppear { WindowActions.shared.register(openWindow) }
     }
 
+    @ToolbarContentBuilder
+    private var detailToolbar: some ToolbarContent {
+        ToolbarItem {
+            Button {
+                showsInspector.toggle()
+            } label: {
+                Label("Sources", systemImage: Glyph.inspector)
+            }
+            .help(showsInspector ? "Hide sources" : "Show what Mnemos saw")
+        }
+
+        ToolbarItem {
+            SettingsLink {
+                Label("Settings", systemImage: Glyph.settings)
+            }
+            .help("Settings")
+        }
+    }
+
+    /// The detail pane follows the selection: a timeline group, a single
+    /// session, or the reason there is nothing to show.
     @ViewBuilder
     private var detail: some View {
         if browser.sidebarSelection == .patterns {
@@ -54,10 +66,23 @@ struct MainWindowView: View {
             }
         } else if let task = browser.selectedTask {
             TaskDetailView(task: task)
+        } else if let group = selectedGroup {
+            TaskGroupDetailView(entry: group)
+                .id(group.id)
         } else {
-            TaskDetailPlaceholder(selectedCount: browser.selectedTaskIDs.count)
+            TaskDetailPlaceholder()
                 .navigationTitle("Memory")
         }
+    }
+
+    /// A rolled-up group opened from the list, or an ad-hoc one for a
+    /// hand-picked set of rows — several sessions selected by hand deserve the
+    /// same combined view as a group the timeline built.
+    private var selectedGroup: TimelineGroup? {
+        if let group = browser.selectedGroup { return group }
+        let tasks = browser.selectedTasks
+        guard tasks.count > 1 else { return nil }
+        return TimelineGroup(tasks: tasks, workstreamID: tasks[0].workstream?.id)
     }
 }
 
@@ -67,7 +92,7 @@ private struct PersonalLayerPlaceholder: View {
 
     var body: some View {
         ContentUnavailableView {
-            Label(title, systemImage: title == "Skills" ? "wand.and.stars" : "point.3.filled.connected.trianglepath.dotted")
+            Label(title, systemImage: title == "Skills" ? Glyph.skills : Glyph.patterns)
         } description: {
             Text(message)
         }

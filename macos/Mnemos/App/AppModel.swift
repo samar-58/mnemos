@@ -48,6 +48,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var personalSkills: [PersonalSkill] = []
     @Published private(set) var skillActivity: [String: SkillActivity] = [:]
     @Published private(set) var agentGrants: [AgentGrant] = []
+    @Published private(set) var availableCodexModels: [String] = []
+    @Published private(set) var codexQuota: CodexRateLimitStatus?
+    @Published private(set) var packetPreview: String?
+    @Published private(set) var isLoadingModels = false
     /// Shown once, immediately after a grant is issued. Mnemos stores only the
     /// hash, so this is the single opportunity to copy the token.
     @Published var issuedGrantToken: (name: String, token: String)?
@@ -362,6 +366,54 @@ final class AppModel: ObservableObject {
         derivationStatus = try? await personalContextStore.derivationStatus()
         if let account = try? await codexProvider.accountStatus() { codexAccountStatus = account }
     }
+
+    /// Which model runs episode extraction. Empty means "use the built-in
+    /// preference order", which is what most people should leave it on.
+    var extractionModel: String {
+        UserDefaults.standard.string(forKey: PersonalContextStore.extractionModelDefaultsKey) ?? ""
+    }
+
+    func setExtractionModel(_ model: String) {
+        if model.isEmpty {
+            UserDefaults.standard.removeObject(forKey: PersonalContextStore.extractionModelDefaultsKey)
+        } else {
+            UserDefaults.standard.set(model, forKey: PersonalContextStore.extractionModelDefaultsKey)
+        }
+        objectWillChange.send()
+    }
+
+    /// Both of these start the Codex process, so they are only ever loaded on
+    /// demand from the Intelligence tab, never on a timer.
+    func loadCodexRuntimeDetails() async {
+        guard codexAccountStatus.signedIn, !isLoadingModels else { return }
+        isLoadingModels = true
+        defer { isLoadingModels = false }
+        availableCodexModels = (try? await codexProvider.availableModels()) ?? []
+        codexQuota = try? await codexProvider.rateLimitStatus()
+    }
+
+    /// Renders exactly what the next enrichment request would contain, after
+    /// redaction and cloud-source filtering, so it can be read before it is
+    /// ever sent.
+    func loadPacketPreview() async {
+        let end = Date.now
+        let start = PersonalContextStore.previousExtractionBoundary(at: end)
+        guard let packet = try? await personalContextStore.evidencePacket(from: start, to: end) else {
+            packetPreview = "No tasks in the current window are eligible for enrichment."
+            return
+        }
+        guard !packet.tasks.isEmpty else {
+            packetPreview = "No tasks in the current window are eligible for enrichment."
+            return
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        packetPreview = (try? encoder.encode(packet)).flatMap { String(data: $0, encoding: .utf8) }
+            ?? "The packet could not be rendered."
+    }
+
+    func clearPacketPreview() { packetPreview = nil }
 
     func runDerivationNow() {
         Task { [weak self] in

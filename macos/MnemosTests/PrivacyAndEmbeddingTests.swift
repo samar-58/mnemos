@@ -37,6 +37,41 @@ final class CapturePrivacyTests: XCTestCase {
         XCTAssertFalse(output?.contains("abc.def.ghi") == true)
     }
 
+    /// Secret keywords usually appear inside a longer identifier, which is how
+    /// every shell export writes them. These all leaked while the pattern
+    /// required a word boundary immediately before the keyword.
+    func testSecretsInsideLongerIdentifiersAreRedacted() {
+        let cases = [
+            "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY",
+            "GITHUB_TOKEN=ghs_shortvalue",
+            "DB_PASSWORD=hunter2",
+            "MY_SECRET=x",
+            "service.api-key: abc123",
+        ]
+        for input in cases {
+            let output = CapturePrivacy.sanitize(input, maximumLength: 1_000)
+            XCTAssertNotNil(output)
+            XCTAssertTrue(
+                output?.contains("[REDACTED]") == true,
+                "Expected a redaction in \(input), got \(output ?? "nil")"
+            )
+        }
+
+        let value = CapturePrivacy.sanitize(
+            "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", maximumLength: 1_000
+        )
+        XCTAssertFalse(value?.contains("wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY") == true)
+        // The name is kept so the context stays readable.
+        XCTAssertTrue(value?.contains("AWS_SECRET_ACCESS_KEY") == true)
+    }
+
+    func testOrdinaryTextIsNotOverRedacted() {
+        let output = CapturePrivacy.sanitize(
+            "git commit -m ship and review the design doc", maximumLength: 1_000
+        )
+        XCTAssertEqual(output, "git commit -m ship and review the design doc")
+    }
+
     func testBrowserURLStripsCredentialsQueryAndFragment() {
         let value = CapturePrivacy.sanitizedBrowserURL("https://person:secret@example.com/path?token=abc#private")
         XCTAssertEqual(value?.absoluteString, "https://example.com/path")

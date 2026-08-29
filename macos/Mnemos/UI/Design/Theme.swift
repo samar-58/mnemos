@@ -2,16 +2,47 @@ import SwiftUI
 
 /// The one spacing scale. Every gap in the app is one of these values.
 enum Spacing {
+    static let xxs: CGFloat = 2
     static let xs: CGFloat = 4
     static let s: CGFloat = 8
     static let m: CGFloat = 12
     static let l: CGFloat = 16
     static let xl: CGFloat = 24
+    static let xxl: CGFloat = 32
 }
 
 enum Radius {
-    static let chip: CGFloat = 6
+    static let chip: CGFloat = 5
+    static let control: CGFloat = 7
     static let container: CGFloat = 10
+    static let card: CGFloat = 12
+}
+
+/// The type scale, named by role rather than by size, so a heading never gets
+/// picked because it "looked about right" in one view.
+enum TypeScale {
+    /// The single largest thing on a screen — the detail view's task title.
+    static let display = Font.system(size: 22, weight: .semibold, design: .default)
+    /// Section titles inside a scroll view.
+    static let section = Font.system(size: 11, weight: .semibold, design: .default)
+    /// A list row's primary line.
+    static let rowTitle = Font.system(size: 13, weight: .semibold, design: .default)
+    /// A list row's supporting line.
+    static let rowBody = Font.system(size: 12, weight: .regular, design: .default)
+    /// Timestamps, durations, counts — anything that should stay column-aligned.
+    static let numeric = Font.system(size: 11, weight: .regular, design: .default).monospacedDigit()
+    /// The quietest line in a row.
+    static let meta = Font.system(size: 11, weight: .regular, design: .default)
+    /// Body copy in the detail pane.
+    static let prose = Font.system(size: 13, weight: .regular, design: .default)
+}
+
+/// Background fills, so "a slightly grey box" is defined once.
+enum Surface {
+    /// A raised card inside a scrolling pane.
+    static let card = AnyShapeStyle(.quaternary.opacity(0.34))
+    /// A pressed or hovered row.
+    static let hover = AnyShapeStyle(.quaternary.opacity(0.5))
 }
 
 /// One SF Symbol per concept, chosen once so the same idea never appears
@@ -41,6 +72,71 @@ enum Glyph {
     static let general = "gearshape"
     static let pause = "pause.fill"
     static let resume = "play.fill"
+    static let settings = "gearshape"
+    static let patterns = "point.3.filled.connected.trianglepath.dotted"
+    static let skills = "wand.and.stars"
+    static let sessions = "square.stack.3d.up"
+    static let expand = "chevron.right"
+}
+
+/// Workstream names are derived from paths and URLs, so the raw value is often
+/// a fragment that means nothing to a person — `partner?expand=1`, a bare
+/// `https:`, a mail message id, a numeric path segment. The sidebar shows a
+/// tidied name and hides the ones that carry no information at all.
+enum ProjectName {
+    /// A readable label: query strings dropped, separators normalised, the
+    /// leftovers of a URL removed.
+    static func display(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let question = value.firstIndex(of: "?") { value = String(value[..<question]) }
+        if let hash = value.firstIndex(of: "#") { value = String(value[..<hash]) }
+        value = value.trimmingCharacters(in: CharacterSet(charactersIn: "/:-_ "))
+        value = value.replacingOccurrences(of: "%20", with: " ")
+        return value.isEmpty ? raw : value
+    }
+
+    /// False for names that are pure machinery. These still exist in the store
+    /// and still group their tasks; they simply do not earn a sidebar row.
+    static func isMeaningful(_ raw: String) -> Bool {
+        let value = display(raw)
+        guard value.count >= 2, value.count <= 60 else { return false }
+        // Numbers alone ("65") say nothing about what was worked on.
+        if value.allSatisfy(\.isNumber) { return false }
+        // Protocol fragments left behind when a URL was parsed as a path.
+        if ["http", "https", "file", "www", "about", "localhost"].contains(value.lowercased()) { return false }
+        // Opaque identifiers — mail message ids, tokens — are long runs of
+        // mixed case and digits with no separator to read them by.
+        if value.count >= 16, !value.contains(where: { $0 == " " || $0 == "-" || $0 == "_" || $0 == "." }) {
+            let digits = value.filter(\.isNumber).count
+            let uppercase = value.filter(\.isUppercase).count
+            if digits > 0, uppercase > 0, digits + uppercase > value.count / 3 { return false }
+        }
+        return true
+    }
+}
+
+/// "Where you left off" is only worth a heading when it points somewhere. A
+/// bare keystroke like `⌘W`, or a one-word window fragment, is noise dressed up
+/// as an answer.
+enum LastState {
+    private static let noise: Set<String> = [
+        "untitled", "new tab", "unknown", "none", "loading", "…", "-", "—",
+    ]
+
+    static func isMeaningful(_ raw: String?) -> Bool {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return false }
+        guard value.count >= 4 else { return false }
+        if noise.contains(value.lowercased()) { return false }
+        // Keyboard shortcuts captured as state: ⌘W, ⌃⌥⇧K, and so on.
+        let modifiers = CharacterSet(charactersIn: "⌘⌥⌃⇧⇪↩⌫⎋⇥")
+        if value.unicodeScalars.contains(where: modifiers.contains),
+           value.count <= 6 {
+            return false
+        }
+        // A value with no letters at all is punctuation or a lone number.
+        guard value.contains(where: { $0.isLetter }) else { return false }
+        return true
+    }
 }
 
 extension WorkstreamKind {
@@ -141,8 +237,11 @@ enum DayHeading {
 enum Elapsed {
     /// Compact "4m", "1h 12m" style duration.
     static func label(from start: Date, to end: Date = .now) -> String {
-        let seconds = max(0, Int(end.timeIntervalSince(start)))
-        let minutes = seconds / 60
+        label(seconds: end.timeIntervalSince(start))
+    }
+
+    static func label(seconds interval: TimeInterval) -> String {
+        let minutes = max(0, Int(interval)) / 60
         guard minutes >= 60 else { return "\(max(minutes, 1))m" }
         let remainder = minutes % 60
         return remainder == 0 ? "\(minutes / 60)h" : "\(minutes / 60)h \(remainder)m"

@@ -39,18 +39,19 @@ struct MnemosCommands: Commands {
 
             Divider()
 
+            // Works for a single session and for a whole rolled-up group, so
+            // the shortcut copies whatever the detail pane is showing.
             Button("Copy Context") {
-                guard let task = browser.selectedTask else { return }
-                ContextClipboard.copy(task: task, evidence: browser.selectedTaskEvidence)
+                ContextClipboard.copy(tasks: browser.focusedTasks, evidence: browser.selectedTaskEvidence)
             }
             .keyboardShortcut("c", modifiers: [.command, .shift])
-            .disabled(browser.selectedTask == nil)
+            .disabled(browser.focusedTasks.isEmpty)
 
             Divider()
 
             Button("Merge Selected Tasks") { browser.mergeSelected() }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
-                .disabled(browser.selectedTaskIDs.count < 2)
+                .disabled(browser.focusedTasks.count < 2)
 
             Button("Split Selected Activity") { browser.splitSelectedSpans() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
