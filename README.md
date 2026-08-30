@@ -41,7 +41,7 @@ Swift owns collection, privacy policy, persistence, and product behavior. The Ty
 
 ## Current status
 
-The V2 context-engine prototype is implemented:
+The V3 evidence-backed memory and skill prototype is implemented:
 
 - Swift 6 and SwiftUI macOS application
 - Menu-bar app experience
@@ -67,7 +67,12 @@ The V2 context-engine prototype is implemented:
 - In-app hierarchical Memory inspector with filters, grouping explanations, provenance, rename/pin/workstream/merge/split/move/delete corrections
 - Off-by-default, read-only agent access over an authenticated IPv4 loopback API
 - Per-launch 256-bit bearer tokens handed to adapters through a user-only configuration file
-- TypeScript stdio MCP adapter with `search_memory`, `recent_activity`, `get_episode`, `get_evidence`, `recall_context`, and `get_timeline`
+- Deterministic and optional Codex App Server-enriched memory versions with nullable provenance, source coverage, and durable derivation jobs
+- Evidence-backed workflow traces and repeated-pattern mining, consolidated into a single working-style skill describing the real toolchain, projects, order of work, and rhythm — with approval/rejection, version history, rollback, retirement, and optional native export
+- Per-agent, revocable grant tokens with separate memories, approved-skills, and raw-evidence capabilities
+- TypeScript stdio MCP adapter with ten tools for memory, timeline, task evidence, current/project state, and approved skills
+- Local-calendar recall handling for latest work, last night, first meaningful activity after wake, and specific-day summaries
+- In-app processing and integration health for Codex, the local API, MCP activity, grants, approved skills, job failures, and retries
 - Structured MCP results, read-only annotations, provenance IDs, and explicit prompt-injection boundaries
 - Additive, resumable V1-to-V2 observation replay with assignment, foreign-key, FTS, and vector validation
 - Swift privacy/vector tests and live Swift-API/MCP integration smoke tests
@@ -75,7 +80,7 @@ The V2 context-engine prototype is implemented:
 
 The prototype database lives in `~/Library/Application Support/Mnemos/mnemos.sqlite`. It is restricted to the current macOS user and benefits from macOS/FileVault protection when FileVault is enabled. Application-level database encryption is not implemented yet and is required before a public alpha.
 
-When local agent access is enabled in Mnemos, the app listens only on `127.0.0.1:17373` and writes a short-lived connection configuration to `~/Library/Application Support/Mnemos/agent-api.json`. The configuration file is mode `600`, the token rotates whenever the server starts, and the API is read-only. The MCP adapter reloads this file for every tool call and calls the Swift-owned retrieval API; it does not open the database. Prototype authorization is account-wide: any process running as the same macOS user can read this configuration while access is enabled. Per-agent grants are required before public alpha.
+When local agent access is enabled in Mnemos, the app listens only on `127.0.0.1:17373` and writes a short-lived built-in connection configuration to `~/Library/Application Support/Mnemos/agent-api.json`. The file is mode `600`, its token rotates whenever the server starts, and the API is read-only. Separate named grants can be issued for individual agents and revoked immediately. The MCP adapter reloads its configured grant file for every tool call and never opens SQLite.
 
 ## Requirements
 
@@ -115,6 +120,7 @@ Build and verify the MCP adapter:
 cd mcp
 npm ci
 npm run build
+npm test
 npm run smoke
 ```
 
@@ -148,9 +154,10 @@ mnemos/
 4. Authenticated loopback API — complete for the prototype
 5. TypeScript stdio MCP adapter — complete for the prototype
 6. Codex, Claude, and Cursor dogfood integration — configured locally
-7. V2 hierarchical context engine, hybrid retrieval, corrections, and six-tool MCP — complete for dogfood
+7. V2 hierarchical context engine, hybrid retrieval, and corrections — complete for dogfood
+8. V3 evidence-backed memories, patterns, approved skills, ten-tool MCP, and per-agent grants — complete for dogfood
 
-The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, and internal LLM calls. Keyboard text is buffered into semantic chunks rather than persisted as individual key-down records, and secure input is always suppressed. Application-level database encryption and per-agent authorization remain blockers for public alpha.
+The prototype deliberately excludes cloud sync, screenshots, OCR, audio, clipboard capture, and autonomous actions. Optional Codex enrichment is off by default, runs through an isolated Codex App Server runtime, and sends only explicitly consented, previewable sources. Keyboard text is buffered into semantic chunks rather than persisted as individual key-down records, and secure input is always suppressed. Application-level database encryption, signing/notarization, update delivery, and public release operations remain blockers for public alpha.
 
 ## License
 

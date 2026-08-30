@@ -120,7 +120,7 @@ final class AppModel: ObservableObject {
             }
             refreshAgentAPIStatus()
             await refreshIntelligenceStatus()
-            await derivationCoordinator.runDueJobs()
+            _ = await derivationCoordinator.runDueJobs()
         }
 
         monitorTask = Task { [weak self] in
@@ -419,10 +419,30 @@ final class AppModel: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             intelligenceMessage = "Processing due memory windows…"
-            await derivationCoordinator.runNow()
+            let outcome = await derivationCoordinator.runNow()
             await refreshIntelligenceStatus()
             await refreshPersonalInsights()
-            intelligenceMessage = "Memory processing is up to date."
+            let details = outcome.messages.prefix(2).joined(separator: " ")
+            intelligenceMessage = details.isEmpty ? outcome.summary : "\(outcome.summary) — \(details)"
+        }
+    }
+
+    func retryFailedDerivations() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let reset = try await personalContextStore.retryFailedJobs()
+                intelligenceMessage = reset == 0
+                    ? "There are no failed memory jobs to retry."
+                    : "Retrying \(reset) failed memory job\(reset == 1 ? "" : "s")…"
+                let outcome = await derivationCoordinator.runNow()
+                await refreshIntelligenceStatus()
+                await refreshPersonalInsights()
+                let details = outcome.messages.prefix(2).joined(separator: " ")
+                intelligenceMessage = details.isEmpty ? outcome.summary : "\(outcome.summary) — \(details)"
+            } catch {
+                intelligenceMessage = "Could not retry memory processing: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -659,7 +679,7 @@ final class AppModel: ObservableObject {
         if tickCount.isMultiple(of: 60) {
             Task { [weak self] in
                 guard let self else { return }
-                await derivationCoordinator.runDueJobs()
+                _ = await derivationCoordinator.runDueJobs()
                 await refreshIntelligenceStatus()
             }
         }

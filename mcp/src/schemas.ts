@@ -138,7 +138,8 @@ export const relevantSkillSchema = z.object({
 export const personalContextPackSchema = z.object({
   query: z.string().optional(), currentState: z.array(workstreamStateSchema),
   memories: z.array(memorySearchV3ResultSchema), approvedSkills: z.array(relevantSkillSchema),
-  evidence: z.array(evidenceItemSchema), trustBoundary: z.string(), generatedAt: z.iso.datetime(),
+  evidence: z.array(evidenceItemSchema), coverageNote: z.string().optional(),
+  trustBoundary: z.string(), generatedAt: z.iso.datetime(),
 });
 
 export const memoryV3DetailSchema = z.object({ memory: derivedMemorySchema, claims: z.array(memoryClaimSchema) });

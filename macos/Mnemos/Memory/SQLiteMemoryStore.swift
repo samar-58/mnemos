@@ -257,12 +257,14 @@ actor SQLiteMemoryStore {
     }
 
     private func configureDatabase() throws {
+        // Set this before changing journal mode: multiple stores initialize
+        // concurrently against the same database at launch.
+        try execute("PRAGMA busy_timeout = 5000")
         try execute("PRAGMA journal_mode = WAL")
         try execute("PRAGMA foreign_keys = ON")
         try execute("PRAGMA synchronous = NORMAL")
         try execute("PRAGMA temp_store = MEMORY")
         try execute("PRAGMA secure_delete = ON")
-        try execute("PRAGMA busy_timeout = 5000")
     }
 
     private func migrateDatabase() throws {

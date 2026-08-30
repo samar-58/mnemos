@@ -25,6 +25,11 @@ enum AgentAPIStatus: Equatable, Sendable {
         case let .failed(message): message
         }
     }
+
+    var isRunning: Bool {
+        if case .running = self { return true }
+        return false
+    }
 }
 
 actor LocalMemoryAPI {
@@ -287,10 +292,7 @@ actor LocalMemoryAPI {
         }
 
         let path = components.path
-        let queryItems = Dictionary(
-            components.queryItems?.compactMap { item in item.value.map { (item.name, $0) } } ?? [],
-            uniquingKeysWith: { first, _ in first }
-        )
+        let queryItems = Self.formDecodedQueryItems(components.percentEncodedQuery)
 
         do {
             switch path {
@@ -317,7 +319,7 @@ actor LocalMemoryAPI {
                 let query = Self.optionalContextQuery(queryItems)
                 let fallback = try await contextStore.search(query)
                 let memories = try await personalStore.search(query, fallback: fallback)
-                let pack = try await personalStore.composeContext(query: query.text, memories: memories)
+                let pack = try await personalStore.composeContext(query: queryItems["q"], memories: memories)
                 return try jsonResponse(APIEnvelope(data: Self.filtered(pack, for: grant)))
 
             case "/v3/timeline":
@@ -510,6 +512,9 @@ actor LocalMemoryAPI {
                 message: error.localizedDescription
             )
         } catch {
+            // Keep API responses generic so database details never become
+            // agent-visible, but preserve the local cause for diagnostics.
+            NSLog("Mnemos agent retrieval failed: %@", error.localizedDescription)
             return errorResponse(status: 500, reason: "Internal Server Error", message: "Memory retrieval failed.")
         }
     }
@@ -604,10 +609,12 @@ actor LocalMemoryAPI {
 
     private static func filtered(_ pack: PersonalContextPack, for grant: AgentGrant) -> PersonalContextPack {
         PersonalContextPack(
-            query: pack.query, currentState: pack.currentState,
-            memories: filtered(pack.memories, for: grant),
+            query: pack.query,
+            currentState: grant.allows(.memories) ? pack.currentState : [],
+            memories: grant.allows(.memories) ? filtered(pack.memories, for: grant) : [],
             approvedSkills: grant.allows(.skills) ? pack.approvedSkills : [],
             evidence: grant.allows(.evidence) ? pack.evidence : [],
+            coverageNote: grant.allows(.memories) ? pack.coverageNote : nil,
             trustBoundary: pack.trustBoundary, generatedAt: pack.generatedAt
         )
     }
@@ -646,7 +653,7 @@ actor LocalMemoryAPI {
                 NSLocalizedDescriptionKey: "The from date must not be after to."
             ])
         }
-        return MemoryQuery(
+        let query = MemoryQuery(
             text: text?.isEmpty == false ? text : nil,
             from: from,
             to: to,
@@ -655,16 +662,41 @@ actor LocalMemoryAPI {
             pinnedOnly: items["pinned"] == "true",
             limit: boundedLimit(items["limit"], defaultValue: 10, maximum: 50)
         )
+        return RecallIntentResolver.resolve(query).query
+    }
+
+    /// `URLComponents` percent-decodes query values but leaves `+` alone, and
+    /// standard form encoders — including the `URLSearchParams` the MCP adapter
+    /// uses — write spaces as `+`. Decoding it here keeps a natural-language
+    /// recall question intact instead of turning it into one unmatchable token.
+    static func formDecodedQueryItems(_ percentEncodedQuery: String?) -> [String: String] {
+        guard let percentEncodedQuery, !percentEncodedQuery.isEmpty else { return [:] }
+        var items: [String: String] = [:]
+        for pair in percentEncodedQuery.split(separator: "&", omittingEmptySubsequences: true) {
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let rawName = parts.first else { continue }
+            let name = decodeFormComponent(String(rawName))
+            let value = parts.count > 1 ? decodeFormComponent(String(parts[1])) : ""
+            guard !name.isEmpty, items[name] == nil else { continue }
+            items[name] = value
+        }
+        return items
+    }
+
+    private static func decodeFormComponent(_ value: String) -> String {
+        let spaced = value.replacingOccurrences(of: "+", with: " ")
+        return spaced.removingPercentEncoding ?? spaced
     }
 
     private static func optionalContextQuery(_ items: [String: String]) -> MemoryQuery {
-        MemoryQuery(
+        let query = MemoryQuery(
             text: items["q"]?.trimmingCharacters(in: .whitespacesAndNewlines),
             from: items["from"].flatMap(parseDate), to: items["to"].flatMap(parseDate),
             application: items["application"], workstream: items["workstream"],
             pinnedOnly: items["pinned"] == "true",
             limit: boundedLimit(items["limit"], defaultValue: 8, maximum: 20)
         )
+        return RecallIntentResolver.resolve(query).query
     }
 
     private static func parseDate(_ value: String?) -> Date? {

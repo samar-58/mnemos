@@ -74,6 +74,21 @@ final class ContextSegmentationTests: XCTestCase {
         await fixture.shutdown()
     }
 
+    func testBrowserURLMisreportedAsDocumentPathUsesHostWorkstream() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        try await fixture.record(event(
+            at: .now, app: "Google Chrome", bundle: "com.google.Chrome",
+            window: "Pull request", path: "/https:/github.com/acme/widget/pull/12"
+        ))
+        let tasks = try await fixture.context.recentTasks(limit: 5)
+        let task = try XCTUnwrap(tasks.first)
+        XCTAssertEqual(task.workstream?.kind, .gitRepository)
+        XCTAssertEqual(task.workstream?.canonicalKey, "github.com/acme/widget")
+        XCTAssertEqual(task.workstream?.displayName, "widget")
+        await fixture.shutdown()
+    }
+
     func testSessionClosesOnPauseAndIdle() async throws {
         let fixture = try Fixture()
         defer { fixture.removeFiles() }

@@ -26,7 +26,7 @@ struct WelcomeView: View {
             Divider()
             footer
         }
-        .frame(width: 560, height: 440)
+        .frame(width: 560, height: 500)
         .onChange(of: model.accessibilityTrusted) { _, trusted in
             if trusted, step == 1 { step = 2 }
         }
@@ -62,18 +62,23 @@ struct WelcomeView: View {
             VStack(alignment: .leading, spacing: Spacing.m) {
                 WelcomePoint(
                     symbol: "lock.laptopcomputer",
-                    title: "Everything stays on this Mac",
-                    detail: "No cloud, no screenshots, no audio, no clipboard."
+                    title: "Local memory is the default",
+                    detail: "Capture and deterministic recall stay on this Mac. Mnemos records no screenshots, audio, or clipboard."
                 )
                 WelcomePoint(
-                    symbol: Glyph.application,
-                    title: "You choose what it can see",
-                    detail: "The list of apps starts empty. Add only what is useful."
+                    symbol: "accessibility",
+                    title: "Accessibility is required for capture",
+                    detail: "The app allowlist starts empty, and only the apps you select are observed."
+                )
+                WelcomePoint(
+                    symbol: Glyph.intelligence,
+                    title: "Codex enrichment is optional",
+                    detail: "Cloud enrichment is off by default and has its own source consent controls. Local recall works without it."
                 )
                 WelcomePoint(
                     symbol: Glyph.agents,
-                    title: "Agents ask, you decide",
-                    detail: "Access is off until you switch it on, and it is read-only."
+                    title: "MCP agent access is optional",
+                    detail: "Local access is read-only and remains off until you enable it and issue a revocable agent grant."
                 )
             }
         }
@@ -138,6 +143,11 @@ struct WelcomeView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            Text("After recording starts, optional Codex enrichment lives in Settings → Intelligence, and MCP grants live in Settings → Agents.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

@@ -38,6 +38,7 @@ actor PersonalContextStore {
     private var database: OpaquePointer?
     private let databaseURL: URL
     private let embeddingProvider = AppleSentenceEmbeddingProvider()
+    private var lastSynchronizationReport = MemorySynchronizationReport.empty
 
     static let schemaVersion = 3
     static let derivationVersion = 1
@@ -284,9 +285,19 @@ actor PersonalContextStore {
             applications: leading?.applications ?? [], limit: 3
         )
         let evidence = Array(memories.flatMap(\.evidencePreviews).prefix(12))
+        let omitted = memories.reduce(0) { $0 + $1.memory.omittedSourceCount }
+        let coverageNote: String?
+        if memories.isEmpty {
+            coverageNote = "No eligible evidence-backed memory matched this request. Do not infer missing activity."
+        } else if omitted > 0 || memories.contains(where: { $0.memory.sourceCoverage < 1 }) {
+            coverageNote = "Some source evidence was omitted by privacy settings. Treat this result as partial, not a complete activity record."
+        } else {
+            coverageNote = nil
+        }
         return PersonalContextPack(
             query: query, currentState: try recentWorkstreamStates(limit: 5), memories: memories,
-            approvedSkills: relevant, evidence: evidence, trustBoundary: Self.trustBoundary,
+            approvedSkills: relevant, evidence: evidence, coverageNote: coverageNote,
+            trustBoundary: Self.trustBoundary,
             generatedAt: .now
         )
     }
@@ -820,6 +831,13 @@ actor PersonalContextStore {
             pendingJobs: try scalarInt("SELECT COUNT(*) FROM derivation_jobs WHERE status IN ('pending','deferred','running')"),
             failedJobs: try scalarInt("SELECT COUNT(*) FROM derivation_jobs WHERE status = 'failed'"),
             lastSuccessfulRunAt: try optionalScalarDate("SELECT MAX(completed_at) FROM derivation_runs WHERE status = 'completed'"),
+            lastError: try scalarText(
+                "SELECT error FROM derivation_jobs WHERE error IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+            ),
+            lastErrorAt: try optionalScalarDate(
+                "SELECT updated_at FROM derivation_jobs WHERE error IS NOT NULL ORDER BY updated_at DESC LIMIT 1"
+            ),
+            lastSynchronizationSkipped: lastSynchronizationReport.skipped,
             nextExtractionAt: Self.nextExtraction(after: now),
             nextConsolidationAt: Self.nextConsolidation(after: now)
         )
@@ -827,7 +845,8 @@ actor PersonalContextStore {
 
     // MARK: - Synchronization and deterministic derivation
 
-    func synchronizeDeterministicMemories(limit: Int = 500) throws {
+    @discardableResult
+    func synchronizeDeterministicMemories(limit: Int = 500) throws -> MemorySynchronizationReport {
         try prepareIfNeeded()
         let ids = try stringColumn(
             """
@@ -839,7 +858,25 @@ actor PersonalContextStore {
             """,
             values: [.int(min(max(limit, 1), 2_000))]
         )
-        for id in ids { try synchronizeTask(id) }
+        var failures: [String] = []
+        var succeeded = 0
+        for id in ids {
+            // Legacy data can occasionally contain a record that cannot be
+            // derived under the current schema. Keep that one task from
+            // blocking all recall while preserving a local diagnostic.
+            do {
+                try synchronizeTask(id)
+                succeeded += 1
+            } catch {
+                NSLog("Mnemos skipped memory derivation for task %@: %@", id, error.localizedDescription)
+                failures.append("\(id): \(String(error.localizedDescription.prefix(240)))")
+            }
+        }
+        let report = MemorySynchronizationReport(
+            processed: ids.count, succeeded: succeeded, failures: failures
+        )
+        lastSynchronizationReport = report
+        return report
     }
 
     private func synchronizeTask(_ taskID: String) throws {
@@ -950,14 +987,14 @@ actor PersonalContextStore {
 
     private func meaningfulResumeState(task: TaskMemory, evidence: [EvidenceItem]) -> ResumeState? {
         for item in evidence.sorted(by: { $0.timestamp > $1.timestamp }) {
-            if let path = item.documentPath, !path.isEmpty {
+            if let path = item.documentPath, Self.isMeaningfulDocumentPath(path) {
                 return ResumeState(kind: .document, value: path, application: item.applicationName, timestamp: item.timestamp, supportingEvidenceID: item.id)
             }
-            if let url = item.url, !url.isEmpty {
+            if let url = item.url, Self.isMeaningfulWebURL(url) {
                 return ResumeState(kind: .webpage, value: url, application: item.applicationName, timestamp: item.timestamp, supportingEvidenceID: item.id)
             }
             let excerpt = item.excerpt?.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let excerpt, !excerpt.isEmpty, !Self.genericDetails.contains(excerpt.lowercased()) else { continue }
+            guard let excerpt, Self.isMeaningfulResumeText(excerpt, evidenceKind: item.kind) else { continue }
             let kind: ResumeStateKind
             switch item.kind {
             case CapturedEvent.Kind.terminal.rawValue: kind = .terminal
@@ -967,15 +1004,41 @@ actor PersonalContextStore {
             }
             return ResumeState(kind: kind, value: String(excerpt.prefix(500)), application: item.applicationName, timestamp: item.timestamp, supportingEvidenceID: item.id)
         }
-        if let state = task.lastState, !Self.genericDetails.contains(state.lowercased()) {
+        if let state = task.lastState, Self.isMeaningfulResumeText(state, evidenceKind: nil) {
             return ResumeState(kind: .window, value: state, application: task.applications.last ?? "Unknown", timestamp: task.endedAt, supportingEvidenceID: nil)
         }
         return nil
     }
 
+    private static func isMeaningfulDocumentPath(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/"), !trimmed.contains("\n"), trimmed.count > 1 else { return false }
+        return !trimmed.lowercased().hasPrefix("/http:") && !trimmed.lowercased().hasPrefix("/https:")
+    }
+
+    private static func isMeaningfulWebURL(_ value: String) -> Bool {
+        guard let url = URL(string: value), let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), let host = url.host, !host.isEmpty else { return false }
+        return true
+    }
+
+    private static func isMeaningfulResumeText(_ value: String, evidenceKind: String?) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        guard !trimmed.isEmpty, !genericDetails.contains(lower) else { return false }
+        if evidenceKind == "AX diff" || lower.contains("accessibility tree") { return false }
+        if lower.contains("role=ax") || lower.contains("subrole=\"") { return false }
+        if trimmed.hasPrefix("- [") || trimmed.hasPrefix("+ [") { return false }
+        return true
+    }
+
     private static let genericDetails: Set<String> = [
         "left click", "right click", "window changed", "frontmost application changed",
-        "screen sleep", "screen locked", "capture paused", "capture resumed",
+        "screen sleep", "system sleep", "screen locked", "capture paused", "capture resumed",
+        "system wake", "screen wake", "screen unlocked",
+        "initial bounded accessibility tree", "bounded accessibility tree",
+        "meaningful accessibility tree changes",
+        "capture session paused", "capture session resumed",
     ]
 
     // MARK: - Evidence packets and model result application
@@ -1229,8 +1292,86 @@ actor PersonalContextStore {
                     values: [.text(id), .text(trace.taskID), .text(trace.id), .double(trace.endedAt.timeIntervalSince1970)]
                 ) { try stepDone($0) }
             }
-            try ensureCandidateSkill(patternID: id)
         }
+        // Patterns stay as signal, but they no longer each spawn a skill. One
+        // consolidated skill built from every episode is what an agent can use.
+        try synthesizeWorkingStyleSkill(now: now)
+    }
+
+    /// Builds or updates the single working-style skill from all captured work.
+    /// A new version is written only when the content actually changes, so the
+    /// approved version stays current until the user approves the successor.
+    @discardableResult
+    func synthesizeWorkingStyleSkill(now: Date = .now) throws -> PersonalSkill? {
+        try prepareIfNeeded()
+        guard let draft = WorkingStyleSynthesizer.synthesize(try workingStyleInput(), now: now) else {
+            return nil
+        }
+        let skillID = WorkingStyleSynthesizer.skillID
+        let hash = contentHash(draft.contentSignature)
+        let existingStatus = try scalarText("SELECT status FROM skills WHERE id = ? LIMIT 1", values: [.text(skillID)])
+        let isNew = existingStatus == nil
+        // A rejected working-style skill stays rejected until the user revisits it.
+        guard existingStatus != PersonalSkillStatus.rejected.rawValue else { return nil }
+
+        try withStatement(
+            """
+            INSERT INTO skills(id, source_pattern_id, current_version_id, title, description,
+                scope_workstream_id, status, confidence, occurrence_count, created_at, updated_at)
+            VALUES(?, NULL, NULL, ?, ?, NULL, 'candidate', ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET title=excluded.title, description=excluded.description,
+                confidence=excluded.confidence, occurrence_count=excluded.occurrence_count,
+                updated_at=excluded.updated_at
+            """,
+            values: [
+                .text(skillID), .text(draft.title), .text(draft.description),
+                .double(draft.confidence), .int(draft.occurrenceCount),
+                .double(now.timeIntervalSince1970), .double(now.timeIntervalSince1970),
+            ]
+        ) { try stepDone($0) }
+
+        if try scalarInt(
+            "SELECT COUNT(*) FROM skill_versions WHERE skill_id = ? AND content_hash = ?",
+            values: [.text(skillID), .text(hash)]
+        ) > 0 {
+            return try skill(id: skillID)?.0
+        }
+
+        let versionID = UUID().uuidString.lowercased()
+        let nextVersion = try scalarInt(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM skill_versions WHERE skill_id = ?",
+            values: [.text(skillID)]
+        )
+        try withStatement(
+            """
+            INSERT INTO skill_versions(id, skill_id, version, trigger_text, workflow_json,
+                preferences_json, constraints_json, verification_json, evidence_memory_ids_json,
+                content_hash, approved_at, created_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+            """,
+            values: [
+                .text(versionID), .text(skillID), .int(nextVersion), .text(draft.trigger),
+                .text(encodeList(draft.workflow)), .text(encodeList(draft.preferences)),
+                .text(encodeList(draft.constraints)), .text(encodeList(draft.verification)),
+                .text(encodeList(draft.evidenceMemoryIDs)), .text(hash),
+                .double(now.timeIntervalSince1970),
+            ]
+        ) { try stepDone($0) }
+
+        // Never swap an approved skill's content underneath the agents using it.
+        if isNew || existingStatus == PersonalSkillStatus.candidate.rawValue {
+            try withStatement(
+                "UPDATE skills SET current_version_id = ?, updated_at = ? WHERE id = ?",
+                values: [.text(versionID), .double(now.timeIntervalSince1970), .text(skillID)]
+            ) { try stepDone($0) }
+        }
+        for memoryID in draft.evidenceMemoryIDs {
+            try withStatement(
+                "INSERT OR IGNORE INTO skill_evidence(skill_version_id, memory_id) VALUES(?, ?)",
+                values: [.text(versionID), .text(memoryID)]
+            ) { try stepDone($0) }
+        }
+        return try skill(id: skillID)?.0
     }
 
     func approveSkill(id: String) throws {
@@ -1325,10 +1466,12 @@ actor PersonalContextStore {
               let handle else { throw PersonalContextError.sqlite("Unable to open the Mnemos V3 database.") }
         database = handle
         do {
+            // A concurrent V2 store may be enabling WAL during app launch.
+            // Configure the wait before issuing that locking pragma.
+            try execute("PRAGMA busy_timeout = 5000")
             try execute("PRAGMA journal_mode = WAL")
             try execute("PRAGMA foreign_keys = ON")
             try execute("PRAGMA synchronous = NORMAL")
-            try execute("PRAGMA busy_timeout = 5000")
             try migrateV3()
         } catch {
             sqlite3_close(handle)
@@ -1510,11 +1653,33 @@ actor PersonalContextStore {
             // Added after agent_grants shipped; harmless duplicate-column error
             // on databases that already have it.
             try? execute("ALTER TABLE agent_grants ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0")
+            try dropPerPatternSkills()
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
             throw error
         }
+    }
+
+    /// Skill generation used to emit one skill per mined pattern, which produced
+    /// fragments named after raw event kinds ("Edit Text → Switch Context").
+    /// Those are replaced by the single working-style skill, so the unapproved
+    /// ones are removed. Anything the user approved or rejected is left alone.
+    private func dropPerPatternSkills() throws {
+        try execute(
+            """
+            DELETE FROM skills
+            WHERE source_pattern_id IS NOT NULL AND status = 'candidate'
+              AND id <> '\(WorkingStyleSynthesizer.skillID)'
+            """
+        )
+        try execute(
+            """
+            DELETE FROM skill_versions
+            WHERE skill_id NOT IN (SELECT id FROM skills)
+            """
+        )
+        try execute("DELETE FROM skill_evidence WHERE skill_version_id NOT IN (SELECT id FROM skill_versions)")
     }
 
     // MARK: - SQL/model helpers
@@ -1601,6 +1766,7 @@ actor PersonalContextStore {
             ]
         ) { statement in
             for index in 14...18 where resume == nil { sqlite3_bind_null(statement, Int32(index)) }
+            if resume?.supportingEvidenceID == nil { sqlite3_bind_null(statement, 18) }
             if provider == nil { sqlite3_bind_null(statement, 23) }
             if model == nil { sqlite3_bind_null(statement, 24) }
             if effort == nil { sqlite3_bind_null(statement, 25) }
@@ -1733,48 +1899,162 @@ actor PersonalContextStore {
         return readable.isEmpty ? "Repeated workflow" : readable.joined(separator: " → ").capitalized
     }
 
-    private func ensureCandidateSkill(patternID: String) throws {
-        guard let pattern = try patterns(limit: 200).first(where: { $0.id == patternID }) else { return }
-        let skillID = "skill:\(patternID.replacingOccurrences(of: "pattern:", with: ""))"
-        let now = Date.now
+    /// Counts everything the working-style skill is allowed to claim. Only
+    /// episodes that became a memory are considered, so capture lifecycle noise
+    /// never reaches the skill.
+    private func workingStyleInput(calendar: Calendar = .current) throws -> WorkingStyleSynthesizer.Input {
+        var input = WorkingStyleSynthesizer.Input()
+
+        var appCounts: [String: (bundle: String?, count: Int)] = [:]
         try withStatement(
             """
-            INSERT INTO skills(id, source_pattern_id, current_version_id, title, description,
-                scope_workstream_id, status, confidence, occurrence_count, created_at, updated_at)
-            VALUES(?, ?, NULL, ?, ?, ?, 'candidate', ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET confidence=excluded.confidence,
-                occurrence_count=excluded.occurrence_count, updated_at=excluded.updated_at
-            """,
-            values: [
-                .text(skillID), .text(pattern.id), .text(pattern.title), .text(pattern.summary),
-                .text(pattern.scopeWorkstreamID ?? ""), .double(pattern.confidence), .int(pattern.occurrenceCount),
-                .double(now.timeIntervalSince1970), .double(now.timeIntervalSince1970),
-            ]
+            SELECT e.application_name, COUNT(*) FROM evidence_items e
+            JOIN memory_records r ON r.scope_type = 'episode' AND r.scope_id = e.task_id
+            GROUP BY e.application_name
+            """
         ) { statement in
-            if pattern.scopeWorkstreamID == nil { sqlite3_bind_null(statement, 6) }
-            try stepDone(statement)
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let name = WorkingStyleSynthesizer.normalizeAppName(columnText(statement, 0) ?? "")
+                guard !name.isEmpty else { continue }
+                let count = Int(sqlite3_column_int64(statement, 1))
+                appCounts[name] = (appCounts[name]?.bundle, (appCounts[name]?.count ?? 0) + count)
+            }
         }
-        guard try scalarText("SELECT current_version_id FROM skills WHERE id = ?", values: [.text(skillID)]) == nil else { return }
-        let versionID = UUID().uuidString.lowercased()
-        let memoryIDs = pattern.evidenceTaskIDs.map { "episode:\($0)" }
-        let hash = contentHash("\(pattern.trigger)|\(pattern.workflow.joined(separator: "|"))")
+        try withStatement(
+            "SELECT application_name, bundle_id FROM activity_spans GROUP BY application_name"
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let name = WorkingStyleSynthesizer.normalizeAppName(columnText(statement, 0) ?? "")
+                guard let existing = appCounts[name] else { continue }
+                appCounts[name] = (existing.bundle ?? columnText(statement, 1), existing.count)
+            }
+        }
+        input.apps = appCounts.map {
+            WorkingStyleSynthesizer.AppUsage(name: $0.key, bundleID: $0.value.bundle, observations: $0.value.count)
+        }
+
         try withStatement(
             """
-            INSERT INTO skill_versions(id, skill_id, version, trigger_text, workflow_json,
-                preferences_json, constraints_json, verification_json, evidence_memory_ids_json,
-                content_hash, approved_at, created_at)
-            VALUES(?, ?, 1, ?, ?, '[]', '[]', ?, ?, ?, NULL, ?)
-            """,
-            values: [
-                .text(versionID), .text(skillID), .text(pattern.trigger), .text(encodeList(pattern.workflow)),
-                .text(encodeList(["Verify the result before considering the workflow complete."])),
-                .text(encodeList(memoryIDs)), .text(hash), .double(now.timeIntervalSince1970),
-            ]
-        ) { try stepDone($0) }
-        try withStatement("UPDATE skills SET current_version_id = ? WHERE id = ?", values: [.text(versionID), .text(skillID)]) { try stepDone($0) }
-        for memoryID in memoryIDs where (try? scalarInt("SELECT COUNT(*) FROM memory_records WHERE id = ?", values: [.text(memoryID)])) ?? 0 > 0 {
-            try withStatement("INSERT OR IGNORE INTO skill_evidence(skill_version_id, memory_id) VALUES(?, ?)", values: [.text(versionID), .text(memoryID)]) { try stepDone($0) }
+            SELECT w.display_name, w.kind, COUNT(DISTINCT t.id), MAX(t.ended_at)
+            FROM workstreams w
+            JOIN task_episodes_v2 t ON t.workstream_id = w.id
+            JOIN memory_records r ON r.scope_type = 'episode' AND r.scope_id = t.id
+            GROUP BY w.id
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let name = columnText(statement, 0), !name.isEmpty,
+                      let kind = WorkstreamKind(rawValue: columnText(statement, 1) ?? "") else { continue }
+                input.projects.append(WorkingStyleSynthesizer.ProjectUsage(
+                    name: name, kind: kind, episodes: Int(sqlite3_column_int64(statement, 2)),
+                    lastActiveAt: dateColumn(statement, 3)
+                ))
+            }
         }
+
+        input.memoryCount = try scalarInt("SELECT COUNT(*) FROM memory_records")
+        input.episodeCount = try scalarInt("SELECT COUNT(*) FROM memory_records WHERE scope_type = 'episode'")
+
+        // Daily-consolidation memories span a whole calendar day, so including
+        // them would report work starting at midnight and ending at midnight.
+        var days: Set<Date> = []
+        var loops: [String] = []
+        var roots: [String: Int] = [:]
+        var hosts: [String: Int] = [:]
+        try withStatement(
+            """
+            SELECT v.started_at, v.ended_at, v.open_loops_json, v.artifacts_json
+            FROM memory_versions v
+            JOIN memory_records r ON r.current_version_id = v.id
+            WHERE r.scope_type = 'episode'
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let started = dateColumn(statement, 0)
+                let ended = dateColumn(statement, 1)
+                days.insert(calendar.startOfDay(for: started))
+                input.startHours.append(calendar.component(.hour, from: started))
+                if input.firstActivityAt.map({ started < $0 }) ?? true { input.firstActivityAt = started }
+                if input.lastActivityAt.map({ ended > $0 }) ?? true { input.lastActivityAt = ended }
+                loops.append(contentsOf: decodeList(columnText(statement, 2)))
+                for artifact in decodeList(columnText(statement, 3)) {
+                    if let root = Self.artifactRoot(artifact) {
+                        roots[root, default: 0] += 1
+                    } else if let host = Self.artifactHost(artifact) {
+                        hosts[host, default: 0] += 1
+                    }
+                }
+            }
+        }
+        input.dayCount = days.count
+        input.openLoops = Array(NSOrderedSet(array: loops).compactMap { $0 as? String }.prefix(5))
+        input.artifactRoots = roots.sorted { $0.value > $1.value }.prefix(4).map(\.key)
+        input.webSurfaces = hosts.sorted { $0.value > $1.value }.prefix(5).map(\.key)
+
+        var transitions: [String: Int] = [:]
+        var previousTask: String?
+        var previousApp: String?
+        try withStatement(
+            """
+            SELECT e.task_id, e.application_name FROM evidence_items e
+            JOIN memory_records r ON r.scope_type = 'episode' AND r.scope_id = e.task_id
+            ORDER BY e.task_id, e.timestamp
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                let task = columnText(statement, 0)
+                let app = columnText(statement, 1)
+                defer { previousTask = task; previousApp = app }
+                guard let app, let previousApp, previousTask == task, previousApp != app else { continue }
+                transitions["\(previousApp)\u{1}\(app)", default: 0] += 1
+            }
+        }
+        input.transitions = transitions.compactMap { key, count in
+            let parts = key.split(separator: "\u{1}", maxSplits: 1)
+            guard parts.count == 2 else { return nil }
+            return WorkingStyleSynthesizer.Input.Transition(
+                from: String(parts[0]), to: String(parts[1]), count: count
+            )
+        }
+
+        try withStatement(
+            """
+            SELECT DISTINCT e.excerpt FROM evidence_items e
+            JOIN memory_records r ON r.scope_type = 'episode' AND r.scope_id = e.task_id
+            WHERE e.kind = 'Terminal' AND e.excerpt IS NOT NULL
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let excerpt = columnText(statement, 0),
+                      Self.isVerificationCommand(excerpt) else { continue }
+                input.verificationCommands.append(String(excerpt.prefix(120)))
+            }
+        }
+
+        input.evidenceMemoryIDs = try stringColumn(
+            "SELECT id FROM memory_records ORDER BY updated_at DESC LIMIT 40"
+        )
+        return input
+    }
+
+    /// The directory a project sits in, so the skill can say where work lives
+    /// without listing every file.
+    private static func artifactRoot(_ artifact: String) -> String? {
+        guard artifact.hasPrefix("/") else { return nil }
+        let parts = artifact.split(separator: "/", omittingEmptySubsequences: true)
+        guard parts.count >= 3 else { return nil }
+        return "/" + parts.prefix(3).joined(separator: "/")
+    }
+
+    private static func artifactHost(_ artifact: String) -> String? {
+        guard let host = URL(string: artifact)?.host, !host.isEmpty else { return nil }
+        return host
+    }
+
+    private static func isVerificationCommand(_ excerpt: String) -> Bool {
+        let text = excerpt.lowercased()
+        return ["test", "xcodebuild", "pytest", "cargo check", "lint", "tsc", "build"]
+            .contains { text.contains($0) }
     }
 
     private func skillVersion(id: String) throws -> SkillVersion {
@@ -1862,6 +2142,40 @@ actor PersonalContextStore {
                 .double(to.timeIntervalSince1970), .text(hash), .double(now.timeIntervalSince1970), .double(now.timeIntervalSince1970),
             ]
         ) { try stepDone($0) }
+    }
+
+    func retryFailedJobs(now: Date = .now) throws -> Int {
+        try prepareIfNeeded()
+        let count = try scalarInt("SELECT COUNT(*) FROM derivation_jobs WHERE status = 'failed'")
+        try withStatement(
+            "UPDATE derivation_jobs SET status = 'pending', attempts = 0, next_run_at = ?, error = NULL, updated_at = ? WHERE status = 'failed'",
+            values: [.double(now.timeIntervalSince1970), .double(now.timeIntervalSince1970)]
+        ) { try stepDone($0) }
+        return count
+    }
+
+    func recordDerivationRun(
+        job: DerivationJob, status: DerivationJobStatus, error: String? = nil,
+        inputCount: Int = 0, outputCount: Int = 0, startedAt: Date
+    ) throws {
+        try prepareIfNeeded()
+        try withStatement(
+            """
+            INSERT INTO derivation_runs(
+                id, job_id, provider, model, effort, status, input_count, output_count,
+                error, started_at, completed_at
+            ) VALUES(?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
+            """,
+            values: [
+                .text(UUID().uuidString.lowercased()), .text(job.id),
+                .text(job.kind == .episodeExtraction ? "codex.app-server" : "local"),
+                .text(status.rawValue), .int(inputCount), .int(outputCount), .text(error ?? ""),
+                .double(startedAt.timeIntervalSince1970), .double(Date.now.timeIntervalSince1970),
+            ]
+        ) { statement in
+            if error == nil { sqlite3_bind_null(statement, 7) }
+            try stepDone(statement)
+        }
     }
 
     static func previousExtractionBoundary(at date: Date, calendar: Calendar = .current) -> Date {

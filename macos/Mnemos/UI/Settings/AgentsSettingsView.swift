@@ -91,7 +91,11 @@ struct AgentsSettingsView: View {
             set: { if !$0 { model.issuedGrantToken = nil } }
         )) {
             if let issued = model.issuedGrantToken {
-                IssuedGrantSheet(name: issued.name, token: issued.token) {
+                IssuedGrantSheet(
+                    name: issued.name, token: issued.token,
+                    baseURL: model.agentAPIStatus.baseURL ?? "http://127.0.0.1:17373",
+                    processID: ProcessInfo.processInfo.processIdentifier
+                ) {
                     model.issuedGrantToken = nil
                 }
             }
@@ -166,29 +170,49 @@ struct AgentsSettingsView: View {
 private struct IssuedGrantSheet: View {
     let name: String
     let token: String
+    let baseURL: String
+    let processID: Int32
     let onDismiss: () -> Void
+
+    private var configuration: String {
+        """
+        {
+          "apiVersion": 2,
+          "baseURL": "\(baseURL)",
+          "bearerToken": "\(token)",
+          "processID": \(processID)
+        }
+        """
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Spacing.l) {
             Text("Token for “\(name)”").font(.headline)
-            Text("Copy this now. Mnemos stores only a hash, so it cannot show the token again.")
+            Text("Copy this now. Mnemos stores only a hash, so it cannot show the token again. Save the configuration in a mode-600 file and set MNEMOS_AGENT_CONFIG to its path for this agent's MCP process.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            CodeText(text: token, lineLimit: nil)
+            CodeText(text: configuration, lineLimit: nil)
                 .padding(Spacing.s)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: Radius.container, style: .continuous))
             HStack {
-                Button("Copy") {
+                Button("Copy configuration") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(token, forType: .string)
+                    NSPasteboard.general.setString(configuration, forType: .string)
                 }
                 Spacer()
                 Button("Done", action: onDismiss).keyboardShortcut(.defaultAction)
             }
         }
         .padding(Spacing.xl)
-        .frame(width: 460)
+        .frame(width: 560)
+    }
+}
+
+private extension AgentAPIStatus {
+    var baseURL: String? {
+        guard case let .running(port) = self else { return nil }
+        return "http://127.0.0.1:\(port)"
     }
 }
 

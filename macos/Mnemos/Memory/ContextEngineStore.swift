@@ -132,7 +132,11 @@ actor ContextEngineStore {
         try execute("BEGIN IMMEDIATE TRANSACTION")
         let taskID: String
         do {
-            taskID = try derive(observation)
+            // The V1 store owns `observations`, so a capture that lands while
+            // preparation is backfilling is already derived by the time we get
+            // here. Deriving it a second time would open a duplicate session
+            // and split one stretch of work across two episodes.
+            taskID = try derivedTask(for: observation.id) ?? derive(observation)
             try execute("COMMIT")
         } catch {
             try? execute("ROLLBACK")
@@ -750,13 +754,15 @@ actor ContextEngineStore {
                 throw ContextStoreError.sqlite("Unable to open the Mnemos database.")
             }
             database = handle
+            // A concurrent store can hold the journal lock during launch.
+            try execute("PRAGMA busy_timeout = 5000")
             try execute("PRAGMA journal_mode = WAL")
             try execute("PRAGMA foreign_keys = ON")
             try execute("PRAGMA synchronous = NORMAL")
             try execute("PRAGMA secure_delete = ON")
-            try execute("PRAGMA busy_timeout = 5000")
             try migrateV2()
             try backfillIfNeeded()
+            try repairMalformedURLWorkstreamNames()
             try closeStaleState(now: .now)
             try pruneExpiredObservations(now: .now)
             applyPrivateFilePermissions()
@@ -895,6 +901,39 @@ actor ContextEngineStore {
         }
     }
 
+    /// Early Accessibility captures occasionally stored browser URLs in the
+    /// document-path column, producing workstreams such as `https:`. Preserve
+    /// their stable IDs and user corrections while repairing the human label.
+    private func repairMalformedURLWorkstreamNames() throws {
+        var rows: [(id: String, canonicalKey: String)] = []
+        try withStatement(
+            """
+            SELECT id, canonical_key FROM workstreams
+            WHERE user_confirmed = 0 AND (
+                lower(canonical_key) LIKE 'local:/https:%'
+                OR lower(canonical_key) LIKE 'local:/http:%'
+            )
+            """
+        ) { statement in
+            while sqlite3_step(statement) == SQLITE_ROW {
+                rows.append((columnText(statement, 0) ?? "", columnText(statement, 1) ?? ""))
+            }
+        }
+        for row in rows where !row.id.isEmpty {
+            let rawPath = String(row.canonicalKey.dropFirst("local:".count))
+            let anchor = Self.webURL(fromPossiblyFilePath: rawPath).flatMap(Self.webAnchor)
+            let kind = anchor?.kind ?? .website
+            let displayName = anchor?.displayName ?? "Web activity"
+            try withStatement(
+                "UPDATE workstreams SET kind = ?, display_name = ?, updated_at = ? WHERE id = ? AND user_confirmed = 0",
+                values: [
+                    .text(kind.rawValue), .text(displayName),
+                    .double(Date.now.timeIntervalSince1970), .text(row.id),
+                ]
+            ) { try stepDone($0) }
+        }
+    }
+
     private func backfillIfNeeded() throws {
         let unassigned = try scalarInt(
             """
@@ -959,6 +998,18 @@ actor ContextEngineStore {
     }
 
     // MARK: - Online derivation
+
+    /// The task an observation already belongs to, when it has been derived.
+    private func derivedTask(for observationID: String) throws -> String? {
+        try scalarText(
+            """
+            SELECT s.task_id FROM span_observations so
+            JOIN activity_spans s ON s.id = so.span_id
+            WHERE so.observation_id = ? LIMIT 1
+            """,
+            values: [.text(observationID)]
+        )
+    }
 
     private func derive(_ observation: Observation) throws -> String {
         try recordRedactionMetrics(observation)
@@ -1347,25 +1398,51 @@ actor ContextEngineStore {
         let cacheKey = observation.documentPath ?? observation.url ?? ""
         if let cached = anchorCache[cacheKey] { return cached }
         let anchor: Anchor?
-        if let path = observation.documentPath {
+        if let path = observation.documentPath, let url = Self.webURL(fromPossiblyFilePath: path) {
+            anchor = Self.webAnchor(url)
+        } else if let path = observation.documentPath, Self.isLocalDocumentPath(path) {
             anchor = Self.fileAnchor(path)
-        } else if let value = observation.url, let url = URL(string: value), let host = url.host?.lowercased() {
-            let parts = url.pathComponents.filter { $0 != "/" }
-            if host == "github.com", parts.count >= 2 {
-                let key = "github.com/\(parts[0].lowercased())/\(parts[1].lowercased().replacingOccurrences(of: ".git", with: ""))"
-                anchor = Anchor(
-                    kind: .gitRepository, canonicalKey: key, displayName: parts[1].replacingOccurrences(of: ".git", with: ""),
-                    values: [("repository", key, 1.0), ("url", "https://\(key)", 0.95)]
-                )
-            } else {
-                let key = "website:\(host)"
-                anchor = Anchor(kind: .website, canonicalKey: key, displayName: host, values: [("domain", host, 0.65)])
-            }
+        } else if let value = observation.url, let url = Self.webURL(fromPossiblyFilePath: value) {
+            anchor = Self.webAnchor(url)
         } else {
             anchor = nil
         }
         if !cacheKey.isEmpty, let anchor { anchorCache[cacheKey] = anchor }
         return anchor
+    }
+
+    private static func webURL(fromPossiblyFilePath value: String) -> URL? {
+        var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidate.hasPrefix("/https:/") {
+            candidate = "https://" + candidate.dropFirst("/https:/".count)
+        } else if candidate.hasPrefix("/http:/") {
+            candidate = "http://" + candidate.dropFirst("/http:/".count)
+        }
+        guard let url = URL(string: candidate), let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), url.host?.isEmpty == false else { return nil }
+        return url
+    }
+
+    private static func isLocalDocumentPath(_ value: String) -> Bool {
+        let lower = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard lower.hasPrefix("/"), lower.count > 1 else { return false }
+        return !lower.hasPrefix("/http:/") && !lower.hasPrefix("/https:/")
+            && lower != "/http:" && lower != "/https:"
+    }
+
+    private static func webAnchor(_ url: URL) -> Anchor? {
+        guard let host = url.host?.lowercased(), !host.isEmpty else { return nil }
+        let parts = url.pathComponents.filter { $0 != "/" }
+        if host == "github.com", parts.count >= 2 {
+            let repository = parts[1].replacingOccurrences(of: ".git", with: "")
+            let key = "github.com/\(parts[0].lowercased())/\(repository.lowercased())"
+            return Anchor(
+                kind: .gitRepository, canonicalKey: key, displayName: repository,
+                values: [("repository", key, 1.0), ("url", "https://\(key)", 0.95)]
+            )
+        }
+        let key = "website:\(host)"
+        return Anchor(kind: .website, canonicalKey: key, displayName: host, values: [("domain", host, 0.65)])
     }
 
     private static func fileAnchor(_ path: String) -> Anchor {
@@ -1742,10 +1819,29 @@ actor ContextEngineStore {
     }
 
     private func filteredRecentTasks(_ query: MemoryQuery) throws -> [TaskMemory] {
-        let filter = taskFilterSQL(query, alias: "t", includeWhere: true)
+        var effectiveQuery = query
+        if query.anchorAfterWake, let from = query.from, let to = query.to {
+            var wake: Date?
+            try withStatement(
+                """
+                SELECT MIN(timestamp) FROM observations
+                WHERE kind = 'Session' AND timestamp >= ? AND timestamp <= ?
+                  AND lower(COALESCE(detail,'')) IN ('system wake','screen wake','screen unlocked')
+                """,
+                values: [.double(from.timeIntervalSince1970), .double(to.timeIntervalSince1970)]
+            ) { statement in
+                if sqlite3_step(statement) == SQLITE_ROW,
+                   sqlite3_column_type(statement, 0) != SQLITE_NULL {
+                    wake = dateColumn(statement, 0)
+                }
+            }
+            if let wake { effectiveQuery.from = wake }
+        }
+        let filter = taskFilterSQL(effectiveQuery, alias: "t", includeWhere: true)
+        let order = effectiveQuery.sortOrder == .chronological ? "t.started_at ASC" : "t.ended_at DESC"
         return try queryTasks(
-            "\(taskSelectSQL) \(filter.sql) ORDER BY t.ended_at DESC LIMIT ?",
-            values: filter.values + [.int(min(max(query.limit, 1), 50))]
+            "\(taskSelectSQL) \(filter.sql) ORDER BY \(order) LIMIT ?",
+            values: filter.values + [.int(min(max(effectiveQuery.limit, 1), 50))]
         )
     }
 
@@ -1763,6 +1859,14 @@ actor ContextEngineStore {
             values.append(.text(workstream)); values.append(.text(workstream))
         }
         if query.pinnedOnly { clauses.append("\(alias).pinned = 1") }
+        if query.meaningfulOnly {
+            // Lifecycle episodes retain no evidence, so they never become a
+            // memory. Anything the user pinned or corrected stays regardless.
+            clauses.append("""
+            (\(alias).pinned = 1 OR \(alias).is_user_locked = 1
+             OR EXISTS(SELECT 1 FROM evidence_items ev WHERE ev.task_id = \(alias).id))
+            """)
+        }
         guard !clauses.isEmpty else { return (includeWhere ? "" : "", values) }
         return ((includeWhere ? "WHERE " : " AND ") + clauses.joined(separator: " AND "), values)
     }

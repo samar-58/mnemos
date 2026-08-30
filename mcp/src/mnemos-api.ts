@@ -123,11 +123,6 @@ export class MnemosAPIClient {
     }
 
     validateLoopbackURL(parsed.data.baseURL);
-    try {
-      process.kill(parsed.data.processID, 0);
-    } catch {
-      throw new MnemosAPIError("The Mnemos agent configuration is stale. Restart Mnemos and retry.");
-    }
     return parsed.data;
   }
 }

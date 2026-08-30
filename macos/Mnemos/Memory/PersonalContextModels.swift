@@ -215,6 +215,7 @@ struct PersonalContextPack: Equatable, Codable, Sendable {
     let memories: [MemorySearchV3Result]
     let approvedSkills: [RelevantSkill]
     let evidence: [EvidenceItem]
+    let coverageNote: String?
     let trustBoundary: String
     let generatedAt: Date
 }
@@ -289,8 +290,41 @@ struct DerivationStatus: Equatable, Codable, Sendable {
     let pendingJobs: Int
     let failedJobs: Int
     let lastSuccessfulRunAt: Date?
+    let lastError: String?
+    let lastErrorAt: Date?
+    let lastSynchronizationSkipped: Int
     let nextExtractionAt: Date
     let nextConsolidationAt: Date
+}
+
+struct DerivationRunOutcome: Equatable, Codable, Sendable {
+    var processed = 0
+    var succeeded = 0
+    var skipped = 0
+    var failed = 0
+    var deferred = 0
+    var messages: [String] = []
+
+    static let noWork = DerivationRunOutcome()
+
+    var summary: String {
+        guard processed > 0 else { return "No memory jobs were due." }
+        var parts = ["Processed \(processed)"]
+        if succeeded > 0 { parts.append("\(succeeded) succeeded") }
+        if skipped > 0 { parts.append("\(skipped) skipped") }
+        if deferred > 0 { parts.append("\(deferred) deferred") }
+        if failed > 0 { parts.append("\(failed) failed") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct MemorySynchronizationReport: Equatable, Sendable {
+    let processed: Int
+    let succeeded: Int
+    let failures: [String]
+
+    static let empty = MemorySynchronizationReport(processed: 0, succeeded: 0, failures: [])
+    var skipped: Int { failures.count }
 }
 
 struct EvidencePacket: Equatable, Codable, Sendable {

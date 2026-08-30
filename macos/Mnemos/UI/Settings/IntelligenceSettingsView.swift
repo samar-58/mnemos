@@ -6,6 +6,40 @@ struct IntelligenceSettingsView: View {
     var body: some View {
         Form {
             Section {
+                healthRow("Capture", healthy: model.accessibilityTrusted, value: model.status.rawValue)
+                healthRow(
+                    "Local memory", healthy: model.memoryHealth.label == "Ready",
+                    value: model.memoryHealth.detail
+                )
+                healthRow("Codex App Server", healthy: model.codexAccountStatus.signedIn,
+                          value: model.codexAccountStatus.signedIn ? "Connected" : "Not connected")
+                healthRow("Local Mnemos API", healthy: model.agentAPIStatus.isRunning,
+                          value: model.agentAPIStatus.label)
+                healthRow(
+                    "Agent grant",
+                    healthy: model.agentGrants.contains { $0.allows(.skills) },
+                    value: model.agentGrants.contains { $0.allows(.skills) }
+                        ? "Active with skills access" : "No active skills grant"
+                )
+                healthRow(
+                    "MCP activity",
+                    healthy: model.agentGrants.contains { $0.lastUsedAt != nil },
+                    value: model.agentGrants.compactMap(\.lastUsedAt).max()
+                        .map { "Last request \($0.formatted(date: .abbreviated, time: .shortened))" }
+                        ?? "No agent request yet"
+                )
+                LabeledContent("Approved skills", value: "\(model.personalSkills.filter { $0.status == .approved }.count)")
+                LabeledContent("Detected patterns", value: "\(model.workflowPatterns.count)")
+                if let completed = model.derivationStatus?.lastSuccessfulRunAt {
+                    LabeledContent("Last memory run") { Text(completed, style: .relative) }
+                }
+            } header: {
+                Text("End-to-end health")
+            } footer: {
+                Text("An approved skill is available to any local MCP agent whose active Mnemos grant includes Approved skills. Native skill export is optional.")
+            }
+
+            Section {
                 LabeledContent("Codex") {
                     HStack(spacing: Spacing.s) {
                         StatusDot(tint: model.codexAccountStatus.signedIn ? .green : .secondary)
@@ -96,6 +130,9 @@ struct IntelligenceSettingsView: View {
                 Section {
                     LabeledContent("Pending jobs", value: "\(status.pendingJobs)")
                     LabeledContent("Failed jobs", value: "\(status.failedJobs)")
+                    if status.lastSynchronizationSkipped > 0 {
+                        LabeledContent("Skipped task memories", value: "\(status.lastSynchronizationSkipped)")
+                    }
                     LabeledContent("Next extraction") {
                         Text(status.nextExtractionAt, style: .time)
                     }
@@ -103,6 +140,18 @@ struct IntelligenceSettingsView: View {
                         Text(status.nextConsolidationAt, style: .time)
                     }
                     Button("Run due jobs now") { model.runDerivationNow() }
+                    if status.failedJobs > 0 {
+                        Button("Retry failed jobs") { model.retryFailedDerivations() }
+                    }
+                    if let error = status.lastError {
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
+                            Text("Last processing error").font(.caption.weight(.semibold))
+                            Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                            if let date = status.lastErrorAt {
+                                Text(date, style: .relative).font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
                 } header: {
                     Text("Schedule")
                 } footer: {
@@ -115,12 +164,25 @@ struct IntelligenceSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .task { await model.refreshIntelligenceStatus() }
+        .task {
+            await model.refreshIntelligenceStatus()
+            await model.refreshAgentGrants()
+            await model.refreshPersonalInsights()
+        }
         .sheet(isPresented: Binding(
             get: { model.packetPreview != nil },
             set: { if !$0 { model.clearPacketPreview() } }
         )) {
             PacketPreviewSheet(text: model.packetPreview ?? "") { model.clearPacketPreview() }
+        }
+    }
+
+    private func healthRow(_ title: String, healthy: Bool, value: String) -> some View {
+        LabeledContent(title) {
+            HStack(spacing: Spacing.s) {
+                StatusDot(tint: healthy ? .green : .secondary)
+                Text(value)
+            }
         }
     }
 }

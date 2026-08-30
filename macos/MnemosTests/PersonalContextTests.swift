@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import SQLite3
 import XCTest
 @testable import Mnemos
 
@@ -67,6 +68,470 @@ final class PersonalContextTests: XCTestCase {
         try await fixture.personal.prepare()
         let memories = try await fixture.personal.recentMemories(limit: 10)
         XCTAssertTrue(memories.isEmpty)
+        await fixture.shutdown()
+    }
+
+    func testResumeWithoutSupportingEvidenceStoresNullForeignKey() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let start = Date.now.addingTimeInterval(-120)
+        try await fixture.record(CapturedEvent(
+            timestamp: start, kind: .session, applicationName: "macOS",
+            bundleID: "com.apple.system", detail: "System sleep"
+        ))
+        let tasks = try await fixture.context.recentTasks(limit: 5)
+        let task = try XCTUnwrap(tasks.first)
+        try await fixture.context.setPinned(true, taskID: task.id)
+        await fixture.context.shutdownForTesting()
+        await fixture.legacy.shutdownForTesting()
+        try fixture.executeSQL(
+            "UPDATE task_episodes_v2 SET last_state = 'Reviewing release checklist' WHERE id = '\(task.id)'; DELETE FROM evidence_items WHERE task_id = '\(task.id)';"
+        )
+
+        try await fixture.personal.prepare()
+        let memories = try await fixture.personal.recentMemories(limit: 10)
+        let memory = try XCTUnwrap(memories.first { $0.scopeID == task.id })
+        XCTAssertEqual(memory.resumeState?.value, "Reviewing release checklist")
+        XCTAssertNil(memory.resumeState?.supportingEvidenceID)
+        let report = try await fixture.personal.synchronizeDeterministicMemories(limit: 20)
+        XCTAssertEqual(report.skipped, 0)
+        await fixture.personal.shutdownForTesting()
+    }
+
+    func testPinnedAccessibilityLifecycleStateIsNotUsedAsResumeText() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        try await fixture.record(CapturedEvent(
+            timestamp: .now.addingTimeInterval(-60), kind: .axSnapshot,
+            applicationName: "Finder", bundleID: "com.apple.finder",
+            windowTitle: "Finder", detail: "Initial bounded Accessibility tree",
+            axText: "- [0] role=AXWindow title=\"Finder\""
+        ))
+        let tasks = try await fixture.context.recentTasks(limit: 5)
+        let task = try XCTUnwrap(tasks.first)
+        try await fixture.context.setPinned(true, taskID: task.id)
+
+        try await fixture.personal.prepare()
+        let memories = try await fixture.personal.recentMemories(limit: 10)
+        let memory = try XCTUnwrap(memories.first { $0.scopeID == task.id })
+        XCTAssertNil(memory.resumeState)
+        XCTAssertFalse(memory.summary.localizedCaseInsensitiveContains("Accessibility tree"))
+        await fixture.shutdown()
+    }
+
+    func testRecallIntentResolverUsesLocalCalendarBoundaries() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Kolkata"))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026, month: 8, day: 30, hour: 10, minute: 30
+        )))
+
+        let night = RecallIntentResolver.resolve(
+            MemoryQuery(text: "What was I doing last night?"), now: now, calendar: calendar
+        )
+        XCTAssertEqual(night.intent, .lastNight)
+        XCTAssertEqual(calendar.component(.day, from: try XCTUnwrap(night.query.from)), 29)
+        XCTAssertEqual(calendar.component(.hour, from: try XCTUnwrap(night.query.from)), 18)
+        XCTAssertEqual(calendar.component(.day, from: try XCTUnwrap(night.query.to)), 30)
+        XCTAssertEqual(calendar.component(.hour, from: try XCTUnwrap(night.query.to)), 5)
+        XCTAssertEqual(night.query.sortOrder, .chronological)
+
+        let morning = RecallIntentResolver.resolve(
+            MemoryQuery(text: "What was the first thing I did when the screen opened in the morning?"),
+            now: now, calendar: calendar
+        )
+        XCTAssertEqual(morning.intent, .firstMorningActivity)
+        XCTAssertTrue(morning.query.anchorAfterWake)
+        XCTAssertEqual(calendar.component(.hour, from: try XCTUnwrap(morning.query.from)), 5)
+        XCTAssertEqual(calendar.component(.hour, from: try XCTUnwrap(morning.query.to)), 12)
+
+        let day = RecallIntentResolver.resolve(
+            MemoryQuery(text: "Summarize my day on 28 August"), now: now, calendar: calendar
+        )
+        guard case let .calendarDay(parsedDay) = day.intent else {
+            return XCTFail("Expected a calendar-day recall intent.")
+        }
+        XCTAssertEqual(calendar.component(.day, from: parsedDay), 28)
+        XCTAssertEqual(calendar.component(.day, from: try XCTUnwrap(day.query.from)), 28)
+        XCTAssertEqual(calendar.component(.day, from: try XCTUnwrap(day.query.to)), 29)
+        XCTAssertEqual(day.query.limit, 50)
+
+        let latest = RecallIntentResolver.resolve(
+            MemoryQuery(text: "What was I working on last?"), now: now, calendar: calendar
+        )
+        XCTAssertEqual(latest.intent, .latest)
+        XCTAssertEqual(latest.query.limit, 1)
+        XCTAssertEqual(latest.query.sortOrder, .recent)
+    }
+
+    func testRealShapeFixtureConsolidatesPatternsAndCreatesCandidateSkill() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let repository = fixture.directory.appendingPathComponent("mnemos", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: repository.appendingPathComponent(".git", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let dayOne = Calendar.current.startOfDay(for: .now.addingTimeInterval(-2 * 86_400))
+        // The app prepares its stores at launch and captures afterwards. One
+        // lifecycle-only event ahead of the fixture window runs the V1 and V2
+        // migrations so the backfill and stale-session sweep cannot run in the
+        // middle of a stretch of work and split it in two.
+        try await fixture.record(CapturedEvent(
+            timestamp: dayOne, kind: .session, applicationName: "macOS",
+            bundleID: "com.apple.system", detail: "Screen sleep"
+        ))
+        let starts = [
+            dayOne.addingTimeInterval(10 * 3_600),
+            dayOne.addingTimeInterval(14 * 3_600),
+            dayOne.addingTimeInterval(86_400 + 10 * 3_600),
+        ]
+        for start in starts {
+            try await fixture.record(CapturedEvent(
+                timestamp: start, kind: .document, applicationName: "Xcode",
+                bundleID: "com.apple.dt.Xcode", windowTitle: "Mnemos",
+                documentPath: repository.appendingPathComponent("AppModel.swift").path,
+                detail: "Opened AppModel.swift"
+            ))
+            try await fixture.record(CapturedEvent(
+                timestamp: start.addingTimeInterval(30), kind: .keyboard, applicationName: "Xcode",
+                bundleID: "com.apple.dt.Xcode", windowTitle: "Mnemos",
+                documentPath: repository.appendingPathComponent("AppModel.swift").path,
+                detail: "Edited memory processing"
+            ))
+            try await fixture.record(CapturedEvent(
+                timestamp: start.addingTimeInterval(60), kind: .session,
+                applicationName: "macOS", bundleID: "com.apple.system", detail: "Capture session paused"
+            ))
+        }
+
+        var readyTaskCount = 0
+        for _ in 0..<100 {
+            let tasks = try await fixture.context.recentTasks(limit: 20).filter { $0.workstream != nil }
+            var ready = 0
+            for task in tasks {
+                let evidence = try await fixture.context.evidence(for: task.id)
+                if evidence.count >= 2 { ready += 1 }
+            }
+            readyTaskCount = ready
+            if ready >= 3 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertGreaterThanOrEqual(readyTaskCount, 3, "The realistic fixture must finish compacting evidence.")
+
+        try await fixture.personal.prepare()
+        try await fixture.personal.consolidateDay(
+            from: dayOne, to: dayOne.addingTimeInterval(86_400)
+        )
+        try await fixture.personal.minePatterns(now: .now)
+
+        let memories = try await fixture.personal.recentMemories(limit: 100)
+        XCTAssertTrue(memories.contains { $0.scope == .dailyWorkstream })
+        let patterns = try await fixture.personal.patterns(limit: 20)
+        XCTAssertEqual(patterns.first?.occurrenceCount, 3)
+        let candidates = try await fixture.personal.skills(status: .candidate, limit: 20)
+        XCTAssertEqual(candidates.map(\.id), [WorkingStyleSynthesizer.skillID])
+        await fixture.shutdown()
+    }
+
+    /// A repeated workflow that never settles on one project still deserves a
+    /// candidate skill. This is the second failure shape the live queue hit:
+    /// an unscoped pattern used to null the skill's confidence instead of its
+    /// workstream and fail with "NOT NULL constraint failed: skills.confidence".
+    func testUnscopedPatternStillProducesCandidateSkill() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let dayOne = Calendar.current.startOfDay(for: .now.addingTimeInterval(-2 * 86_400))
+        try await fixture.record(CapturedEvent(
+            timestamp: dayOne, kind: .session, applicationName: "macOS",
+            bundleID: "com.apple.system", detail: "Screen sleep"
+        ))
+        let starts = [
+            dayOne.addingTimeInterval(10 * 3_600),
+            dayOne.addingTimeInterval(14 * 3_600),
+            dayOne.addingTimeInterval(86_400 + 10 * 3_600),
+        ]
+        for start in starts {
+            try await fixture.record(CapturedEvent(
+                timestamp: start, kind: .terminal, applicationName: "Ghostty",
+                bundleID: "com.mitchellh.ghostty", detail: "git status"
+            ))
+            try await fixture.record(CapturedEvent(
+                timestamp: start.addingTimeInterval(30), kind: .terminal,
+                applicationName: "Ghostty", bundleID: "com.mitchellh.ghostty", detail: "swift test"
+            ))
+            try await fixture.record(CapturedEvent(
+                timestamp: start.addingTimeInterval(60), kind: .session,
+                applicationName: "macOS", bundleID: "com.apple.system", detail: "Capture session paused"
+            ))
+        }
+
+        // Evidence compaction runs off the capture path, so wait for all three
+        // runs to carry the two actions a workflow trace needs.
+        var readyTaskCount = 0
+        for _ in 0..<100 {
+            var ready = 0
+            for task in try await fixture.context.recentTasks(limit: 20) {
+                let evidence = try await fixture.context.evidence(for: task.id)
+                if evidence.count >= 2 { ready += 1 }
+            }
+            readyTaskCount = ready
+            if ready >= 3 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertGreaterThanOrEqual(readyTaskCount, 3, "The fixture must finish compacting evidence.")
+
+        try await fixture.personal.prepare()
+        try await fixture.personal.minePatterns(now: .now)
+
+        let minedPatterns = try await fixture.personal.patterns(limit: 20)
+        let pattern = try XCTUnwrap(minedPatterns.first)
+        XCTAssertNil(pattern.scopeWorkstreamID, "This fixture must exercise the unscoped pattern path.")
+        XCTAssertEqual(pattern.occurrenceCount, 3)
+
+        // A pattern is signal, not a skill of its own: mining it must leave one
+        // consolidated skill rather than one fragment per fingerprint.
+        let candidates = try await fixture.personal.skills(status: .candidate, limit: 20)
+        XCTAssertEqual(candidates.map(\.id), [WorkingStyleSynthesizer.skillID])
+        await fixture.shutdown()
+    }
+
+    /// Form encoders write spaces as `+`, so an undecoded query arrives as one
+    /// long token and silently matches no recall intent at all.
+    func testFormEncodedQueryDecodesSpacesSoRecallIntentsStillMatch() throws {
+        let items = LocalMemoryAPI.formDecodedQueryItems(
+            "q=What+was+I+working+on+last%3F&limit=20&application=Google%20Chrome"
+        )
+        XCTAssertEqual(items["q"], "What was I working on last?")
+        XCTAssertEqual(items["limit"], "20")
+        XCTAssertEqual(items["application"], "Google Chrome")
+
+        let resolved = RecallIntentResolver.resolve(MemoryQuery(text: items["q"], limit: 20))
+        XCTAssertEqual(resolved.intent, .latest)
+        XCTAssertEqual(resolved.query.limit, 1)
+
+        XCTAssertTrue(LocalMemoryAPI.formDecodedQueryItems(nil).isEmpty)
+        XCTAssertTrue(LocalMemoryAPI.formDecodedQueryItems("").isEmpty)
+        XCTAssertEqual(LocalMemoryAPI.formDecodedQueryItems("pinned=true")["pinned"], "true")
+        // A repeated key keeps the first value, as the previous parser did.
+        XCTAssertEqual(LocalMemoryAPI.formDecodedQueryItems("q=one&q=two")["q"], "one")
+    }
+
+    /// "What was I working on last?" must skip the capture lifecycle episode
+    /// that usually sits at the very end of a session and name real work.
+    func testLatestRecallSkipsLifecycleNoiseAndReturnsRealWork() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let start = Date.now.addingTimeInterval(-600)
+        try await fixture.record(CapturedEvent(
+            timestamp: start, kind: .terminal, applicationName: "Ghostty",
+            bundleID: "com.mitchellh.ghostty", windowTitle: "Mnemos", detail: "swift test"
+        ))
+        // The newest episode is lifecycle-only, exactly as it is on a real Mac.
+        try await fixture.record(CapturedEvent(
+            timestamp: start.addingTimeInterval(120), kind: .session,
+            applicationName: "macOS", bundleID: "com.apple.system", detail: "System sleep"
+        ))
+
+        let resolved = RecallIntentResolver.resolve(MemoryQuery(text: "What was I working on last?"))
+        XCTAssertEqual(resolved.intent, .latest)
+        let results = try await fixture.context.search(resolved.query)
+        let task = try XCTUnwrap(results.first?.task, "The latest question must still find real work.")
+        XCTAssertTrue(task.applications.contains("Ghostty"))
+        XCTAssertFalse(task.title.localizedCaseInsensitiveContains("macOS"))
+
+        try await fixture.personal.prepare()
+        let pack = try await fixture.personal.composeContext(query: "What was I working on last?", results: results)
+        XCTAssertEqual(pack.memories.count, 1)
+        XCTAssertNil(pack.coverageNote)
+        await fixture.shutdown()
+    }
+
+    func testWorkingStyleSkillNamesRealToolsProjectsAndOrder() throws {
+        var input = WorkingStyleSynthesizer.Input()
+        input.apps = [
+            .init(name: "ChatGPT", bundleID: "com.openai.chat", observations: 230),
+            .init(name: "Ghostty", bundleID: "com.mitchellh.ghostty", observations: 214),
+            .init(name: "Cursor", bundleID: "com.todesktop.cursor", observations: 160),
+            .init(name: "Google Chrome", bundleID: "com.google.Chrome", observations: 138),
+        ]
+        input.projects = [
+            .init(name: "mnemos", kind: .gitRepository, episodes: 6, lastActiveAt: .now),
+            .init(name: "witlofe", kind: .localProject, episodes: 3, lastActiveAt: .now),
+        ]
+        input.transitions = [
+            .init(from: "ChatGPT", to: "Cursor", count: 20),
+            .init(from: "Cursor", to: "Ghostty", count: 18),
+            .init(from: "Ghostty", to: "Google Chrome", count: 9),
+            .init(from: "Cursor", to: "ChatGPT", count: 4),
+        ]
+        input.artifactRoots = ["/Users/sam/Desktop/witlofe"]
+        input.episodeCount = 30
+        input.dayCount = 4
+        input.startHours = [9, 10, 10, 11, 11, 12, 14, 15, 16, 17]
+        input.evidenceMemoryIDs = ["episode:a", "episode:b"]
+
+        let draft = try XCTUnwrap(WorkingStyleSynthesizer.synthesize(input))
+        let workflow = draft.workflow.joined(separator: "\n")
+        // The order must follow the busiest observed handoffs, not app volume.
+        XCTAssertTrue(workflow.contains("1. Work through the problem in ChatGPT"))
+        XCTAssertTrue(workflow.contains("2. Edit code in Cursor"))
+        XCTAssertTrue(workflow.contains("3. Run commands in Ghostty"))
+        XCTAssertTrue(workflow.contains("mnemos"), "Real projects belong in the workflow.")
+
+        XCTAssertTrue(draft.preferences.contains("Editor: Cursor"))
+        XCTAssertTrue(draft.preferences.contains("Terminal: Ghostty"))
+        XCTAssertTrue(draft.preferences.contains("Browser: Google Chrome"))
+        XCTAssertTrue(draft.preferences.contains("AI assistant: ChatGPT"))
+
+        // Nothing may read like the old raw event-kind fragments.
+        for line in draft.workflow + draft.preferences {
+            XCTAssertFalse(line.contains("_"), "Raw action tokens must not reach the skill: \(line)")
+        }
+        XCTAssertTrue(draft.constraints.contains { $0.contains("Git repositories in active use: mnemos") })
+        XCTAssertEqual(draft.evidenceMemoryIDs, ["episode:a", "episode:b"])
+    }
+
+    /// The first live run produced "most active project is Web activity",
+    /// "WhatsApp (also ‎WhatsApp)", "12:00 AM–11:00 PM", and a step for System
+    /// Settings. None of that describes how somebody works.
+    func testWorkingStyleSkillDropsNoiseThatMadeEarlierOutputUseless() throws {
+        var input = WorkingStyleSynthesizer.Input()
+        input.apps = [
+            .init(name: "Cursor", observations: 160),
+            .init(name: "System Settings", observations: 300),
+            .init(name: "Finder", observations: 120),
+            .init(name: "WhatsApp", observations: 28),
+            // The same app, carrying an invisible left-to-right mark.
+            .init(name: "\u{200E}WhatsApp", observations: 24),
+            .init(name: "Ghostty", observations: 90),
+        ]
+        input.projects = [
+            .init(name: "Web activity", kind: .website, episodes: 40, lastActiveAt: .now),
+            .init(name: "mnemos", kind: .gitRepository, episodes: 6, lastActiveAt: .now),
+        ]
+        input.webSurfaces = ["github.com"]
+        input.artifactRoots = ["/Users/sam/Desktop"]
+        input.episodeCount = 30
+        input.dayCount = 4
+        // A single midnight session must not stretch the day to "12 AM–11 PM".
+        input.startHours = [0, 9, 10, 10, 11, 11, 12, 13, 14, 23]
+
+        let draft = try XCTUnwrap(WorkingStyleSynthesizer.synthesize(input))
+        let everything = (draft.workflow + draft.preferences + draft.constraints + [draft.description])
+            .joined(separator: "\n")
+        XCTAssertFalse(everything.contains("System Settings"), "A utility surface is not a work step.")
+        XCTAssertFalse(everything.contains("Finder"))
+        XCTAssertFalse(everything.contains("Web activity"), "A website bucket is not a project.")
+        XCTAssertFalse(everything.contains("also"), "Duplicate app names must merge: \(everything)")
+        XCTAssertTrue(draft.preferences.contains("Communication: WhatsApp"))
+        XCTAssertTrue(everything.contains("mnemos"))
+        XCTAssertTrue(
+            draft.constraints.contains { $0.contains("Frequently used web surfaces: github.com") },
+            "Web hosts belong beside projects, not inside the project path list."
+        )
+        XCTAssertTrue(draft.constraints.contains { $0.contains("Project files live under /Users/sam/Desktop") })
+        // 10th–90th percentile of the hours above is 9–14, not 0–23.
+        XCTAssertTrue(
+            draft.constraints.contains { $0.contains("Most work starts between") && !$0.contains("11:00 PM") },
+            "Outlier hours must not define the working day: \(draft.constraints)"
+        )
+    }
+
+    func testTypicalHoursStayQuietWhenTheSpreadSaysNothing() {
+        XCTAssertNil(WorkingStyleSynthesizer.typicalHours([9, 10]), "Too few samples to claim a rhythm.")
+        XCTAssertNil(
+            WorkingStyleSynthesizer.typicalHours([0, 1, 6, 11, 14, 17, 20, 22, 23, 23]),
+            "Round-the-clock activity has no typical window."
+        )
+        XCTAssertEqual(WorkingStyleSynthesizer.typicalHours([9, 10, 10, 11, 11, 12, 13, 14]), 9...14)
+        // When no window holds, the busiest hours still carry real signal.
+        XCTAssertEqual(
+            WorkingStyleSynthesizer.busiestHours([0, 11, 11, 11, 13, 13, 13, 15, 15, 15, 23]),
+            [11, 13, 15]
+        )
+        // The 10th and 90th percentile trim the two late outliers away.
+        XCTAssertEqual(
+            WorkingStyleSynthesizer.typicalHours([2, 9, 10, 10, 11, 11, 12, 13, 14, 23]), 9...14
+        )
+    }
+
+    func testWorkingStyleSkillStaysSilentWithoutEnoughEvidence() throws {
+        var input = WorkingStyleSynthesizer.Input()
+        input.apps = [.init(name: "Cursor", observations: 4)]
+        input.episodeCount = 2
+        XCTAssertNil(
+            WorkingStyleSynthesizer.synthesize(input),
+            "Two episodes cannot support a claim about how someone works."
+        )
+    }
+
+    func testWorkingStyleSkillDoesNotInventAVerificationHabit() throws {
+        var input = WorkingStyleSynthesizer.Input()
+        input.apps = [.init(name: "Cursor", observations: 40), .init(name: "Ghostty", observations: 30)]
+        input.episodeCount = 10
+        input.dayCount = 3
+        let unverified = try XCTUnwrap(WorkingStyleSynthesizer.synthesize(input))
+        XCTAssertTrue(unverified.verification.joined().contains("No verification step has been observed"))
+
+        input.verificationCommands = ["swift test", "xcodebuild test"]
+        let verified = try XCTUnwrap(WorkingStyleSynthesizer.synthesize(input))
+        XCTAssertEqual(verified.verification, ["Observed check: swift test", "Observed check: xcodebuild test"])
+        XCTAssertNotEqual(unverified.contentSignature, verified.contentSignature)
+    }
+
+    /// A two-way flip between two applications must not walk forever.
+    func testDominantChainNeverRevisitsAnApplication() {
+        let chain = WorkingStyleSynthesizer.dominantChain(
+            transitions: [
+                .init(from: "Cursor", to: "Ghostty", count: 50),
+                .init(from: "Ghostty", to: "Cursor", count: 48),
+            ],
+            ranked: [.init(name: "Cursor", observations: 90), .init(name: "Ghostty", observations: 80)]
+        )
+        XCTAssertEqual(chain, ["Cursor", "Ghostty"])
+    }
+
+    func testWorkingStyleSkillVersionsOnlyWhenContentChanges() async throws {
+        let fixture = try Fixture()
+        defer { fixture.removeFiles() }
+        let dayOne = Calendar.current.startOfDay(for: .now.addingTimeInterval(-2 * 86_400))
+        try await fixture.record(CapturedEvent(
+            timestamp: dayOne, kind: .session, applicationName: "macOS",
+            bundleID: "com.apple.system", detail: "Screen sleep"
+        ))
+        for index in 0..<4 {
+            let start = dayOne.addingTimeInterval(Double(index) * 86_400 / 2 + 10 * 3_600)
+            try await fixture.record(CapturedEvent(
+                timestamp: start, kind: .keyboard, applicationName: "Cursor",
+                bundleID: "com.todesktop.cursor", windowTitle: "mnemos", detail: "Edited the store"
+            ))
+            try await fixture.record(CapturedEvent(
+                timestamp: start.addingTimeInterval(30), kind: .terminal, applicationName: "Ghostty",
+                bundleID: "com.mitchellh.ghostty", detail: "swift test"
+            ))
+            try await fixture.record(CapturedEvent(
+                timestamp: start.addingTimeInterval(60), kind: .session,
+                applicationName: "macOS", bundleID: "com.apple.system", detail: "Capture session paused"
+            ))
+        }
+        try await fixture.personal.prepare()
+
+        let synthesized = try await fixture.personal.synthesizeWorkingStyleSkill()
+        let first = try XCTUnwrap(synthesized)
+        XCTAssertEqual(first.id, WorkingStyleSynthesizer.skillID)
+        let firstPair = try await fixture.personal.skill(id: first.id)
+        let firstVersion = try XCTUnwrap(firstPair).1
+        XCTAssertEqual(firstVersion.version, 1)
+        XCTAssertFalse(firstVersion.workflow.isEmpty)
+        XCTAssertTrue(firstVersion.preferences.contains { $0.hasPrefix("Editor:") })
+
+        // Re-running over unchanged activity must not churn out a new version.
+        try await fixture.personal.synthesizeWorkingStyleSkill()
+        let repeatedPair = try await fixture.personal.skill(id: first.id)
+        let repeated = try XCTUnwrap(repeatedPair).1
+        XCTAssertEqual(repeated.id, firstVersion.id)
+        XCTAssertEqual(repeated.version, 1)
         await fixture.shutdown()
     }
 
@@ -488,5 +953,21 @@ private extension PersonalContextTests {
         }
 
         func removeFiles() { try? FileManager.default.removeItem(at: directory) }
+
+        func executeSQL(_ sql: String) throws {
+            var handle: OpaquePointer?
+            guard sqlite3_open(database.path, &handle) == SQLITE_OK, let handle else {
+                throw NSError(domain: "PersonalContextTests", code: 1)
+            }
+            defer { sqlite3_close(handle) }
+            var message: UnsafeMutablePointer<CChar>?
+            guard sqlite3_exec(handle, sql, nil, nil, &message) == SQLITE_OK else {
+                let detail = message.map { String(cString: $0) } ?? "SQLite fixture update failed."
+                sqlite3_free(message)
+                throw NSError(domain: "PersonalContextTests", code: 2, userInfo: [
+                    NSLocalizedDescriptionKey: detail,
+                ])
+            }
+        }
     }
 }

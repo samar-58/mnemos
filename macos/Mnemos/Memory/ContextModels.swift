@@ -140,6 +140,115 @@ struct MemoryQuery: Equatable, Sendable {
     var workstream: String?
     var pinnedOnly = false
     var limit = 10
+    var sortOrder: MemorySortOrder = .relevance
+    var anchorAfterWake = false
+    /// Drops capture lifecycle episodes — sleep, wake, session pauses — that
+    /// carry no evidence and never become a memory, so a recall question is
+    /// answered with real work instead of system noise.
+    var meaningfulOnly = false
+}
+
+enum MemorySortOrder: Equatable, Sendable {
+    case relevance
+    case recent
+    case chronological
+}
+
+enum RecallIntent: Equatable, Sendable {
+    case latest
+    case lastNight
+    case firstMorningActivity
+    case calendarDay(Date)
+}
+
+enum RecallIntentResolver {
+    static func resolve(
+        _ query: MemoryQuery, now: Date = .now, calendar: Calendar = .current
+    ) -> (query: MemoryQuery, intent: RecallIntent?) {
+        guard query.from == nil, query.to == nil,
+              let raw = query.text?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return (query, nil)
+        }
+        let text = raw.lowercased()
+        var resolved = query
+
+        if text.contains("first thing") && (text.contains("screen") || text.contains("morning")) {
+            let day = calendar.startOfDay(for: now)
+            resolved.text = nil
+            resolved.from = calendar.date(byAdding: .hour, value: 5, to: day)
+            resolved.to = calendar.date(byAdding: .hour, value: 12, to: day)
+            resolved.limit = 8
+            resolved.sortOrder = .chronological
+            resolved.anchorAfterWake = true
+            resolved.meaningfulOnly = true
+            return (resolved, .firstMorningActivity)
+        }
+
+        if text.contains("last night") {
+            let today = calendar.startOfDay(for: now)
+            let yesterday = calendar.date(byAdding: .day, value: -1, to: today) ?? today.addingTimeInterval(-86_400)
+            resolved.text = nil
+            resolved.from = calendar.date(byAdding: .hour, value: 18, to: yesterday)
+            resolved.to = calendar.date(byAdding: .hour, value: 5, to: today)
+            resolved.limit = 20
+            resolved.sortOrder = .chronological
+            resolved.meaningfulOnly = true
+            return (resolved, .lastNight)
+        }
+
+        if let day = parsedCalendarDay(in: text, now: now, calendar: calendar) {
+            resolved.text = nil
+            resolved.from = calendar.startOfDay(for: day)
+            resolved.to = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: day))
+            resolved.limit = 50
+            resolved.sortOrder = .chronological
+            resolved.meaningfulOnly = true
+            return (resolved, .calendarDay(day))
+        }
+
+        let latestPhrases = [
+            "working on last", "work on last", "doing last", "did last", "most recently working",
+        ]
+        if latestPhrases.contains(where: text.contains) {
+            resolved.text = nil
+            resolved.limit = 1
+            resolved.sortOrder = .recent
+            resolved.meaningfulOnly = true
+            return (resolved, .latest)
+        }
+        return (query, nil)
+    }
+
+    private static func parsedCalendarDay(in text: String, now: Date, calendar: Calendar) -> Date? {
+        let months = "january|february|march|april|may|june|july|august|september|october|november|december"
+        let patterns = [
+            "\\b([0-3]?\\d)\\s+(\(months))(?:\\s+(\\d{4}))?\\b",
+            "\\b(\(months))\\s+([0-3]?\\d)(?:,?\\s+(\\d{4}))?\\b",
+        ]
+        for (index, pattern) in patterns.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  match.numberOfRanges == 4 else { continue }
+            let dayIndex = index == 0 ? 1 : 2
+            let monthIndex = index == 0 ? 2 : 1
+            guard let dayRange = Range(match.range(at: dayIndex), in: text),
+                  let monthRange = Range(match.range(at: monthIndex), in: text),
+                  let day = Int(text[dayRange]) else { continue }
+            let year: Int
+            if let yearRange = Range(match.range(at: 3), in: text), let explicit = Int(text[yearRange]) {
+                year = explicit
+            } else {
+                year = calendar.component(.year, from: now)
+            }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.dateFormat = "MMMM"
+            guard let monthDate = formatter.date(from: String(text[monthRange]).capitalized) else { continue }
+            let month = calendar.component(.month, from: monthDate)
+            if let date = calendar.date(from: DateComponents(year: year, month: month, day: day)) { return date }
+        }
+        return nil
+    }
 }
 
 struct ContextStoreHealth: Equatable, Codable, Sendable {

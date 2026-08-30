@@ -574,6 +574,9 @@ final class AccessibilityCaptureService {
             (NSWorkspace.willSleepNotification, "System sleep"),
             (NSWorkspace.screensDidSleepNotification, "Screen sleep"),
             (NSWorkspace.sessionDidResignActiveNotification, "Screen locked"),
+            (NSWorkspace.didWakeNotification, "System wake"),
+            (NSWorkspace.screensDidWakeNotification, "Screen wake"),
+            (NSWorkspace.sessionDidBecomeActiveNotification, "Screen unlocked"),
         ]
         for (name, detail) in boundaries {
             let observer = NSWorkspace.shared.notificationCenter.addObserver(
